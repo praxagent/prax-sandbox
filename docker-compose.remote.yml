@@ -1,0 +1,70 @@
+name: prax-sandbox-remote
+
+# Remote deployment: a harness elsewhere drives this sandbox over the network
+# through the daemon. The ONLY published port is the daemon's TLS port (8843).
+# The sandbox's own ports (OpenCode 4096, CDP 9223, desktop 6080) stay on the
+# internal network — never published. Works with or without Tailscale:
+#   - Tailscale: run `tailscale serve --bg --https=443 https+insecure://localhost:8843`
+#     (or expose 8843 on the tailnet) — TLS + ACLs for free.
+#   - No Tailscale: provide your own cert/key (./certs) or front it with a
+#     reverse proxy that terminates TLS.
+#
+# Required .env:
+#   PRAX_SANDBOX_DAEMON_TOKEN=<a strong random token>   # clients present this
+#   OPENCODE_SERVER_PASSWORD=<a different random secret> # internal, never client-facing
+# And TLS cert/key at ./certs/daemon.crt / ./certs/daemon.key (or use a proxy).
+
+services:
+  sandbox:
+    image: prax-sandbox:latest          # built from ./sandbox (make build)
+    restart: unless-stopped
+    environment:
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - CLAUDE_CODE_DISABLE_NONINTERACTIVE_CHECK=1
+      # OpenCode requires this password; the daemon holds the same value and
+      # sends it. It is NEVER exposed to clients (port 4096 is internal-only).
+      - OPENCODE_SERVER_PASSWORD=${OPENCODE_SERVER_PASSWORD:?set a strong secret}
+    volumes:
+      - ${WORKSPACE_DIR:-./workspace}:/workspace
+    networks: [sandboxnet]
+    # NO ports: — 4096/9223/6080/6090 stay on the internal network only.
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:4096/global/health"]
+      interval: 5s
+      timeout: 3s
+      start_period: 15s
+      retries: 5
+
+  daemon:
+    build:
+      context: .
+      dockerfile: Dockerfile.daemon
+    restart: unless-stopped
+    environment:
+      - PRAX_SANDBOX_DAEMON_HOST=0.0.0.0
+      - PRAX_SANDBOX_DAEMON_PORT=8843
+      - PRAX_SANDBOX_DAEMON_TOKEN=${PRAX_SANDBOX_DAEMON_TOKEN:?set a strong token}
+      - PRAX_SANDBOX_DAEMON_TLS_CERT=/certs/daemon.crt
+      - PRAX_SANDBOX_DAEMON_TLS_KEY=/certs/daemon.key
+      # reach the sandbox container over the internal network
+      - PRAX_SANDBOX_OPENCODE_HOST=sandbox
+      - PRAX_SANDBOX_OPENCODE_PASSWORD=${OPENCODE_SERVER_PASSWORD:?set a strong secret}
+      - PRAX_SANDBOX_CDP_HOST=sandbox
+      - PRAX_SANDBOX_CDP_PORT=9223
+      - PRAX_SANDBOX_CONTAINER_LABEL=com.docker.compose.service=sandbox
+      - PRAX_SANDBOX_WORKSPACE_DIR=/workspace
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock   # exec into the sandbox container
+      - ${WORKSPACE_DIR:-./workspace}:/workspace     # same workspace for the file API
+      - ${CERTS_DIR:-./certs}:/certs:ro
+    ports:
+      - "8843:8843"   # the ONLY published port — TLS + bearer
+    networks: [sandboxnet]
+    depends_on:
+      sandbox:
+        condition: service_healthy
+
+networks:
+  sandboxnet:
+    driver: bridge

@@ -49,6 +49,17 @@ class SandboxConfig:
     # --- Auth (None = no auth today; the remote daemon sets a token here) ---
     opencode_password: str | None = field(default=None, repr=False)
 
+    # --- Remote transport (None/empty daemon_url = in-process, the default) ---
+    # When daemon_url is set, the client talks to a remote control daemon over
+    # HTTP(S) instead of driving the control plane in-process. This is the SOLE
+    # transport switch — empty means local-first, no network, no Tailscale.
+    daemon_url: str | None = None
+    daemon_token: str | None = field(default=None, repr=False)  # mandatory bearer when remote
+    daemon_timeout: int = 30           # per-request connect+read timeout (long methods override)
+    tls_verify: bool | str = True      # True = system trust; or a path to a CA bundle
+    client_cert: str | None = None     # opt-in mTLS, layered ON TOP of the bearer
+    client_key: str | None = None
+
     # --- Injected host callbacks (None falls back to a no-op) ---
     # (label, text) -> None : stream incremental coding-agent output to the UI.
     on_output: Callable[[str, str], None] | None = None

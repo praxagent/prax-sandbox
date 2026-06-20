@@ -27,36 +27,75 @@ _lock = Lock()
 _msg_counter = 0
 
 
+def _remote():
+    """Return (base_url, token, tls_verify) when a control daemon is configured,
+    else None. In remote mode CDP is reached only through the authed daemon
+    proxy (raw :9223 is never network-exposed)."""
+    try:
+        from prax_sandbox import control_plane
+        cfg = control_plane._cfg()
+        if cfg and (cfg.daemon_url or "").strip():
+            return cfg.daemon_url.rstrip("/"), cfg.daemon_token, cfg.tls_verify
+    except Exception:
+        pass
+    return None
+
+
+def _ssl_context(tls_verify):
+    import ssl
+    if tls_verify is False:
+        ctx = ssl.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+        return ctx
+    if isinstance(tls_verify, str):
+        return ssl.create_default_context(cafile=tls_verify)
+    return ssl.create_default_context()
+
+
 # ---------------------------------------------------------------------------
 # Minimal WebSocket client (RFC 6455) — just enough for CDP request/response
 # ---------------------------------------------------------------------------
 
 def _ws_connect(url: str, timeout: float = 10) -> socket.socket:
-    """Open a WebSocket connection using raw sockets."""
-    # Parse ws://host:port/path
-    assert url.startswith("ws://")
-    rest = url[5:]
-    host_port, path = rest.split("/", 1)
-    path = "/" + path
-    if ":" in host_port:
-        host, port = host_port.split(":")
-        port = int(port)
+    """Open a WebSocket connection using raw sockets (ws:// or wss://)."""
+    if url.startswith("wss://"):
+        secure, rest = True, url[6:]
+    elif url.startswith("ws://"):
+        secure, rest = False, url[5:]
     else:
-        host, port = host_port, 80
+        raise ValueError(f"unexpected websocket url: {url[:24]}")
+    host_port, _, tail = rest.partition("/")
+    path = "/" + tail
+    if ":" in host_port:
+        host, port_s = host_port.split(":", 1)
+        port = int(port_s)
+    else:
+        host, port = host_port, (443 if secure else 80)
 
+    remote = _remote()
     sock = socket.create_connection((host, port), timeout=timeout)
-    # WebSocket upgrade handshake
+    if secure:
+        sock = _ssl_context(remote[2] if remote else True).wrap_socket(sock, server_hostname=host)
+
+    # Local mode pins Host to loopback (the in-container proxy expects it);
+    # remote mode uses the daemon host and carries the bearer token.
     key = b64encode(os.urandom(16)).decode()
-    handshake = (
-        f"GET {path} HTTP/1.1\r\n"
-        f"Host: 127.0.0.1:{CDP_PORT}\r\n"
-        f"Upgrade: websocket\r\n"
-        f"Connection: Upgrade\r\n"
-        f"Sec-WebSocket-Key: {key}\r\n"
-        f"Sec-WebSocket-Version: 13\r\n"
-        f"\r\n"
-    )
-    sock.sendall(handshake.encode())
+    lines = [
+        f"GET {path} HTTP/1.1",
+        f"Host: {host_port if remote else f'127.0.0.1:{CDP_PORT}'}",
+        "Upgrade: websocket",
+        "Connection: Upgrade",
+        f"Sec-WebSocket-Key: {key}",
+        "Sec-WebSocket-Version: 13",
+        # Chrome is launched with --remote-allow-origins=http://127.0.0.1:9222;
+        # present it so the local direct-to-Chrome path is allowed. (Remote mode
+        # hits the daemon, which gates on the bearer, not Origin.)
+        "Origin: http://127.0.0.1:9222",
+    ]
+    if remote and remote[1]:
+        lines.append(f"Authorization: Bearer {remote[1]}")
+    sock.sendall(("\r\n".join(lines) + "\r\n\r\n").encode())
 
     # Read response headers
     buf = b""
@@ -135,7 +174,19 @@ def _ws_recv(sock: socket.socket) -> str:
 # ---------------------------------------------------------------------------
 
 def _cdp_http(path: str, timeout: float = 5) -> dict | list | None:
-    """Make an HTTP request to the CDP proxy."""
+    """Make an HTTP request for CDP targets — via the daemon proxy if remote."""
+    remote = _remote()
+    if remote:
+        base, token, tls_verify = remote
+        req = urllib.request.Request(
+            f"{base}/v1/cdp{path}", headers={"Authorization": f"Bearer {token or ''}"})
+        ctx = _ssl_context(tls_verify) if base.startswith("https") else None
+        try:
+            with urllib.request.urlopen(req, timeout=timeout, context=ctx) as resp:
+                return json.loads(resp.read())
+        except Exception as e:
+            logger.warning("CDP HTTP (daemon) failed (%s): %s", path, e)
+            return None
     url = f"http://{CDP_HOST}:{CDP_PORT}{path}"
     req = urllib.request.Request(url, headers={"Host": f"127.0.0.1:{CDP_PORT}"})
     try:
@@ -163,6 +214,10 @@ def _discover_ws_url() -> str | None:
     # Prefer the last (most recently opened) page target
     page = pages[-1]
     ws_url: str = page["webSocketDebuggerUrl"]
+    if _remote():
+        # The daemon already rewrote webSocketDebuggerUrl to its authed
+        # wss://<daemon>/v1/cdp/ws/... endpoint — use it as-is.
+        return ws_url
     ws_url = ws_url.replace("localhost", CDP_HOST)
     ws_url = ws_url.replace("127.0.0.1", CDP_HOST)
     ws_url = ws_url.replace(":9222/", f":{CDP_PORT}/")

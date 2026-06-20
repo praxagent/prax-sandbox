@@ -20,7 +20,7 @@ exec /usr/bin/chromium-browser \
   --disable-popup-blocking \
   --disable-features=BlockThirdPartyCookies \
   --load-extension=/opt/prax-cast-ext \
-  --remote-allow-origins=* \
+  --remote-allow-origins=http://127.0.0.1:9222 \
   --user-agent="Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36" \
   --remote-debugging-port=9222 \
   --user-data-dir="$PROFILE_DIR" \

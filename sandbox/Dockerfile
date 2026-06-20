@@ -104,8 +104,10 @@ ENV SHELL=/bin/bash
 # commands (sandbox_shell, terminal sessions) can interact with the desktop.
 ENV DISPLAY=:99
 
-# 4096 = OpenCode serve, 9223 = CDP proxy, 6080 = noVNC web desktop, 6090 = clipboard bridge, 8443 = code-server
-EXPOSE 4096 9223 6080 6090 8443
+# 4096 = OpenCode serve, 6080 = noVNC web desktop, 6090 = clipboard bridge, 8443 = code-server.
+# 9223 (raw CDP) is intentionally NOT exposed — reach Chrome only via the
+# authenticated daemon proxy (remote) or the internal docker network (local).
+EXPOSE 4096 6080 6090 8443
 
 HEALTHCHECK --interval=3s --timeout=2s --start-period=15s --retries=5 \
     CMD curl -sf http://localhost:4096/global/health > /dev/null || exit 1

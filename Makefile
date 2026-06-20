@@ -4,7 +4,7 @@ lint:
 	uvx ruff@latest check .
 
 test:
-	uv run --python 3.13 pytest tests/ -q
+	uv run --python 3.13 --extra daemon pytest tests/ -q
 
 ci: lint test
 	@echo "\nAll prax-sandbox checks passed."

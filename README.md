@@ -46,11 +46,19 @@ client.finish_session("user-1", summary="done")
 ```
 
 The client talks to the control plane in-process (it holds the docker socket).
-Running the sandbox on a **remote server** over a VPC is the next milestone: the
-same client points at a control daemon URL + token instead of a local socket.
+To run the sandbox on a **remote server** (with or without Tailscale), run the
+control daemon (`prax-sandbox-daemon`) and point the same client at its URL +
+bearer token — see **[docs/remote.md](docs/remote.md)**.
+
+## Docs
+
+- [docs/](docs/README.md) — sandbox internals (code execution, desktop, browser)
+- [docs/remote.md](docs/remote.md) — running it remotely over TLS + bearer
 
 ## Develop
 
 ```bash
-make ci        # ruff + pytest (HTTP/docker interactions are mocked)
+make ci        # ruff + pytest (HTTP/docker interactions are mocked; [daemon] extra installed)
 ```
+
+Install the daemon dependencies for local daemon work: `pip install -e ".[daemon]"`.

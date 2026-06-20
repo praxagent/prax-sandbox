@@ -1,0 +1,13 @@
+# The remote control daemon — a thin image that installs prax-sandbox[daemon]
+# and runs the FastAPI service. Holds the docker socket (to exec into the
+# sandbox container) and is the ONLY network-exposed surface (TLS + bearer).
+FROM python:3.13-slim
+
+# docker CLI not required — the daemon talks to the socket via the docker SDK.
+WORKDIR /app
+COPY pyproject.toml README.md ./
+COPY prax_sandbox_client ./prax_sandbox_client
+COPY prax_sandbox ./prax_sandbox
+RUN pip install --no-cache-dir ".[daemon]"
+
+ENTRYPOINT ["prax-sandbox-daemon"]

@@ -12,6 +12,7 @@ dir, no live-output, no commit).
 """
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import os
@@ -20,6 +21,7 @@ import subprocess
 import threading
 import time
 import uuid
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 
 import requests
@@ -66,6 +68,22 @@ def _builtin_resolve_workspace(user_id: str) -> str:
 def _noop_commit(root: str, message: str) -> None:
     """Default commit hook — no-op (the harness injects git via the config)."""
     return
+
+
+# Per-call live-output sink. When set (via output_to), it overrides
+# cfg.on_output for the duration of one call — the daemon uses this to stream a
+# send_message's incremental output to the remote client over SSE.
+_output_sink: ContextVar = ContextVar("_sandbox_output_sink", default=None)
+
+
+@contextlib.contextmanager
+def output_to(sink):
+    """Route this call's live output to *sink* (a ``text -> None`` callable)."""
+    token = _output_sink.set(sink)
+    try:
+        yield
+    finally:
+        _output_sink.reset(token)
 
 
 # ---------------------------------------------------------------------------
@@ -229,7 +247,15 @@ def _create_opencode_session(session: SandboxSession, task: str) -> tuple[str | 
 
 
 def _push_sandbox_live(session: SandboxSession, text: str) -> None:
-    """Push incremental live output for the sandbox spoke via the host callback."""
+    """Push incremental live output — to the per-call sink if set (daemon SSE),
+    else the configured host callback."""
+    sink = _output_sink.get()
+    if sink is not None:
+        try:
+            sink(text)
+        except Exception:
+            pass
+        return
     cb = _cfg().on_output
     if cb is None:
         return
