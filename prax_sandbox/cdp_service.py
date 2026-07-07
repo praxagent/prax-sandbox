@@ -20,7 +20,11 @@ from threading import Lock
 
 logger = logging.getLogger(__name__)
 
-CDP_HOST = os.getenv("SANDBOX_HOST", "sandbox")
+# Default to the loopback-published port: the usual consumer is a host process
+# next to the container (compose publishes 9223 on 127.0.0.1).  Compose-internal
+# consumers (a dockerized harness on the same network) set SANDBOX_HOST=sandbox
+# explicitly in their compose environment.
+CDP_HOST = os.getenv("SANDBOX_HOST", "localhost")
 CDP_PORT = int(os.getenv("CDP_PORT", "9223"))
 
 _lock = Lock()
