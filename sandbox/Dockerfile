@@ -79,6 +79,22 @@ COPY --from=ghcr.io/astral-sh/uv@sha256:e49fde5daf002023f0a2e2643861ce9ca8a8da5b
 RUN uv venv /opt/prax-venv --python python3 \
     && uv pip install --python /opt/prax-venv/bin/python faster-whisper
 
+# ── Lean 4 toolchain (elan → lean/lake) for the lean_check proof tool ──
+# Installed to /opt/elan, NOT the elan default ~/.elan — /root is volume-mounted
+# at runtime and would hide it (same reason as uv above). ELAN_HOME is baked as
+# an ENV so `docker exec` shells inherit it and the lean/lake proxies (symlinked
+# into /usr/local/bin) resolve the toolchain. Pinned to the Lean version cdc-lean
+# uses, so that repo stays rebuildable. mathlib is deliberately NOT fetched here
+# (multi-GB, needs a lake project) — this is the toolchain-only scope: lean_check
+# handles Lean-core proofs (arithmetic, logic, rfl). See prax's
+# docs/research/cdc-lean-teach-prax-lean.md.
+ENV ELAN_HOME=/opt/elan
+RUN curl -fsSL https://elan.lean-lang.org/elan-init.sh -o /tmp/elan-init.sh \
+    && sh /tmp/elan-init.sh -y --default-toolchain leanprover/lean4:v4.31.0 \
+    && rm -f /tmp/elan-init.sh \
+    && ln -sf /opt/elan/bin/* /usr/local/bin/ \
+    && lean --version
+
 WORKDIR /workspace
 
 # Seed config — copied to /opt/ so it survives volume mounts.
