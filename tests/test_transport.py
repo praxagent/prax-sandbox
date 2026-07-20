@@ -99,15 +99,6 @@ class TestSelector:
 # --------------------------------------------------------------------------- #
 
 class TestHttpMapping:
-    def test_start_session_maps_and_returns_json(self):
-        body = {"session_id": "s1", "status": "running", "model": "m"}
-        t = _http(lambda m, u, j: FakeResp(200, body))
-        out = t.start_session("+1", "build", model="m")
-        assert out == body
-        call = t._s.calls[0]
-        assert call["method"] == "POST" and call["url"].endswith("/v1/sessions/start")
-        assert call["json"] == {"user_id": "+1", "task": "build", "model": "m"}
-
     def test_run_shell_returns_dict(self):
         t = _http(lambda m, u, j: FakeResp(200, {"stdout": "hi", "stderr": "", "exit_code": 0}))
         assert t.run_shell("ls")["stdout"] == "hi"
@@ -120,48 +111,10 @@ class TestHttpMapping:
         assert cp.returncode == 0 and cp.stdout == "hi\n"
         assert t._s.calls[0]["url"].endswith("/v1/exec")
 
-    def test_get_active_session_hydrates_protocol(self):
-        d = {"session_id": "s1", "user_id": "+1", "model": "m", "created_at": 1.0,
-             "status": "running", "rounds_used": 2, "max_rounds": 10}
-        t = _http(lambda m, u, j: FakeResp(200, d))
-        s = t.get_active_session("+1")
-        assert isinstance(s, RemoteSession)
-        assert isinstance(s, SandboxSession)  # runtime_checkable Protocol
-        assert s.session_id == "s1" and s.rounds_used == 2
-
-    def test_get_active_session_none(self):
-        # daemon returns JSON null when there's no active session -> None
-        t = _http(lambda m, u, j: FakeResp(200, json_data=None))
-        assert t.get_active_session("+1") is None
-
     def test_capabilities_uses_remote(self):
         t = _http(lambda m, u, j: FakeResp(200, {"persistent": True, "remote": True, "file_api": True}))
         caps = t.capabilities()
         assert caps["remote"] is True and caps["file_api"] is True
-
-
-class TestSseSendMessage:
-    def test_streams_output_then_returns_result(self):
-        captured = []
-        sse = [
-            "event: output", 'data: "partial 1"', "",
-            "event: output", 'data: "partial 2"', "",
-            "event: result", 'data: {"response": "done", "rounds_used": 1}', "",
-        ]
-        cfg = SandboxConfig(daemon_url="https://d:8843", daemon_token="t",
-                            on_output=lambda label, text: captured.append(text))
-        t = HttpTransport(cfg)
-        t._s = FakeSession(lambda m, u, j: FakeResp(200, lines=sse))
-        result = t.send_message("+1", "go")
-        assert captured == ["partial 1", "partial 2"]
-        assert result["response"] == "done" and result["rounds_used"] == 1
-        assert t._s.calls[0]["stream"] is True
-
-    def test_no_on_output_still_returns_result(self):
-        sse = ["event: result", 'data: {"response": "ok"}', ""]
-        t = HttpTransport(SandboxConfig(daemon_url="https://d:8843", daemon_token="t"))
-        t._s = FakeSession(lambda m, u, j: FakeResp(200, lines=sse))
-        assert t.send_message("+1", "go")["response"] == "ok"
 
 
 # --------------------------------------------------------------------------- #
@@ -175,19 +128,13 @@ def _boom(*a, **k):
 class TestFailures:
     def test_dict_methods_return_error_dict(self):
         t = _http(_boom)
-        assert "error" in t.start_session("+1", "x")
         assert "error" in t.run_shell("ls")
-        assert t.search_solutions("+1", "q") == []  # list method degrades to []
+        assert "error" in t.install_package("jq")
 
     def test_run_command_raises_not_falls_back(self):
         t = _http(_boom)
         with pytest.raises(SandboxTransportError):
             t.run_command(["echo", "hi"])
-
-    def test_get_active_session_raises(self):
-        t = _http(_boom)
-        with pytest.raises(SandboxTransportError):
-            t.get_active_session("+1")
 
     def test_health_returns_false_never_raises(self):
         assert _http(_boom).health() is False
@@ -205,7 +152,7 @@ class TestFailures:
             assert "SEKRIT-TOKEN" not in str(e)
             assert "SEKRIT-TOKEN" not in repr(e)
         # error-dict path too
-        assert "SEKRIT-TOKEN" not in str(t.start_session("+1", "x"))
+        assert "SEKRIT-TOKEN" not in str(t.run_shell("echo hi"))
 
 
 # --------------------------------------------------------------------------- #

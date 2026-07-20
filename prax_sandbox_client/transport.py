@@ -41,21 +41,11 @@ class Transport(Protocol):
     """The seam the facade talks to — mirrors the SandboxClient method set."""
 
     def configure(self, config: SandboxConfig) -> None: ...
-    def start_session(self, user_id, task, model=None) -> dict: ...
-    def send_message(self, user_id, message, model=None, session_id=None) -> dict: ...
-    def review_session(self, user_id, session_id=None) -> dict: ...
-    def finish_session(self, user_id, summary="", session_id=None) -> dict: ...
-    def abort_session(self, user_id, session_id=None) -> dict: ...
     def run_shell(self, command, timeout=60) -> dict: ...
     def run_command(self, cmd, cwd=None, env=None, timeout=300) -> subprocess.CompletedProcess: ...
     def install_package(self, package_name) -> dict: ...
     def rebuild_sandbox(self, dockerfile_content=None) -> dict: ...
-    def search_solutions(self, user_id, query) -> list: ...
-    def execute_solution(self, user_id, solution_id, command=None) -> dict: ...
-    def get_active_session(self, user_id): ...
-    def get_active_sessions(self, user_id) -> list: ...
     def get_runtime_mode(self) -> str: ...
-    def cleanup_stale_sessions(self) -> int: ...
     def health(self) -> bool: ...
     def capabilities(self) -> dict: ...
     # file API — used by harness sync adapters in remote mode
@@ -205,45 +195,7 @@ class HttpTransport:
         except SandboxTransportError as e:
             return {"error": str(e)}
 
-    # --- session lifecycle (dict-returning → error-dict on failure) ---
-    def start_session(self, user_id, task, model=None):
-        return self._json("POST", "/v1/sessions/start", json={"user_id": user_id, "task": task, "model": model})
-
-    def send_message(self, user_id, message, model=None, session_id=None):
-        # Streams SSE: each `output` event is forwarded to the harness's
-        # on_output callback; the final `result` event is returned.
-        import requests
-        payload = {"user_id": user_id, "message": message, "model": model, "session_id": session_id}
-        try:
-            resp = self._s.request("POST", self._base + "/v1/sessions/message",
-                                   json=payload, stream=True, timeout=_LONG_TIMEOUT)
-        except requests.RequestException as e:
-            return {"error": str(SandboxTransportError("POST", "/v1/sessions/message", type(e).__name__))}
-        if resp.status_code >= 400:
-            return {"error": _safe_reason(resp)}
-        result = {"error": "no result from daemon"}
-        try:
-            for kind, data in _iter_sse(resp):
-                if kind == "output":
-                    if self._on_output:
-                        try:
-                            self._on_output("Sandbox Agent", data if isinstance(data, str) else str(data))
-                        except Exception:
-                            pass
-                elif kind == "result":
-                    result = data
-        finally:
-            resp.close()
-        return result
-
-    def review_session(self, user_id, session_id=None):
-        return self._json("POST", "/v1/sessions/review", json={"user_id": user_id, "session_id": session_id})
-
-    def finish_session(self, user_id, summary="", session_id=None):
-        return self._json("POST", "/v1/sessions/finish", json={"user_id": user_id, "summary": summary, "session_id": session_id})
-
-    def abort_session(self, user_id, session_id=None):
-        return self._json("POST", "/v1/sessions/abort", json={"user_id": user_id, "session_id": session_id})
+    # (OpenCode coding-SESSION endpoints removed — pure execution env.)
 
     # --- shell / packages ---
     def run_shell(self, command, timeout=60):
@@ -267,38 +219,12 @@ class HttpTransport:
         return self._json("POST", "/v1/rebuild", timeout=_LONG_TIMEOUT,
                           json={"dockerfile_content": dockerfile_content})
 
-    # --- solutions ---
-    def search_solutions(self, user_id, query):
-        try:
-            return self._call("POST", "/v1/solutions/search", json={"user_id": user_id, "query": query}).json()
-        except SandboxTransportError:
-            return []
-
-    def execute_solution(self, user_id, solution_id, command=None):
-        return self._json("POST", "/v1/solutions/execute",
-                          json={"user_id": user_id, "solution_id": solution_id, "command": command})
-
-    # --- introspection (sessions → raise; the rest degrade) ---
-    def get_active_session(self, user_id):
-        r = self._call("POST", "/v1/sessions/active-one", json={"user_id": user_id})
-        d = r.json()
-        return RemoteSession.from_dict(d) if d else None
-
-    def get_active_sessions(self, user_id):
-        r = self._call("POST", "/v1/sessions/active", json={"user_id": user_id})
-        return [RemoteSession.from_dict(d) for d in r.json()]
-
+    # --- introspection ---
     def get_runtime_mode(self):
         try:
             return self._call("GET", "/v1/runtime-mode").json().get("mode", "remote")
         except SandboxTransportError:
             return "remote (daemon unreachable)"
-
-    def cleanup_stale_sessions(self):
-        try:
-            return int(self._call("POST", "/v1/admin/cleanup-stale").json().get("count", 0))
-        except SandboxTransportError:
-            return 0
 
     def health(self) -> bool:
         try:

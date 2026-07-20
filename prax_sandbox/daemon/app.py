@@ -108,73 +108,7 @@ def build_app(cfg) -> FastAPI:
     async def runtime_mode():
         return {"mode": await run_in_threadpool(control_plane.get_runtime_mode)}
 
-    # --- sessions ---
-    @app.post("/v1/sessions/start", dependencies=auth)
-    async def start_session(body: dict = Body(...)):
-        return await run_in_threadpool(
-            control_plane.start_session, body["user_id"], body["task"], body.get("model"))
-
-    @app.post("/v1/sessions/message", dependencies=auth)
-    async def send_message(body: dict = Body(...)):
-        # Stream live coding-agent output as SSE: zero or more `output` events
-        # then exactly one `result` event with the final dict.
-        import json as _json
-        if exec_limit.busy():
-            raise HTTPException(status_code=429, detail="too many concurrent operations")
-        loop = asyncio.get_running_loop()
-        q: asyncio.Queue = asyncio.Queue()
-
-        def sink(text: str) -> None:
-            loop.call_soon_threadsafe(q.put_nowait, ("output", text))
-
-        def run() -> None:
-            try:
-                with control_plane.output_to(sink):
-                    result = control_plane.send_message(
-                        body["user_id"], body["message"], body.get("model"), body.get("session_id"))
-            except Exception as e:  # noqa: BLE001 — surface as a result event, never crash the stream
-                result = {"error": str(e)}
-            loop.call_soon_threadsafe(q.put_nowait, ("result", result))
-
-        async def gen():
-            await exec_limit.acquire()
-            worker = asyncio.create_task(asyncio.to_thread(run))
-            try:
-                while True:
-                    kind, payload = await q.get()
-                    yield f"event: {kind}\ndata: {_json.dumps(payload)}\n\n"
-                    if kind == "result":
-                        break
-            finally:
-                exec_limit.release()
-                await worker
-
-        return StreamingResponse(gen(), media_type="text/event-stream")
-
-    @app.post("/v1/sessions/review", dependencies=auth)
-    async def review_session(body: dict = Body(...)):
-        return await run_in_threadpool(
-            control_plane.review_session, body["user_id"], body.get("session_id"))
-
-    @app.post("/v1/sessions/finish", dependencies=auth)
-    async def finish_session(body: dict = Body(...)):
-        return await run_in_threadpool(
-            control_plane.finish_session, body["user_id"], body.get("summary", ""), body.get("session_id"))
-
-    @app.post("/v1/sessions/abort", dependencies=auth)
-    async def abort_session(body: dict = Body(...)):
-        return await run_in_threadpool(
-            control_plane.abort_session, body["user_id"], body.get("session_id"))
-
-    @app.post("/v1/sessions/active", dependencies=auth)
-    async def active_sessions(body: dict = Body(...)):
-        sessions = await run_in_threadpool(control_plane.get_active_sessions, body["user_id"])
-        return [_session_dict(s) for s in sessions]
-
-    @app.post("/v1/sessions/active-one", dependencies=auth)
-    async def active_one(body: dict = Body(...)):
-        s = await run_in_threadpool(control_plane.get_active_session, body["user_id"])
-        return _session_dict(s) if s else None
+    # (OpenCode coding-SESSION routes /v1/sessions/* removed — pure exec env.)
 
     # --- shell / exec / packages ---
     @app.post("/v1/shell", dependencies=auth)
@@ -201,19 +135,7 @@ def build_app(cfg) -> FastAPI:
             raise HTTPException(status_code=403, detail="image rebuild is disabled on this daemon")
         return await run_in_threadpool(control_plane.rebuild_sandbox, body.get("dockerfile_content"))
 
-    # --- solutions ---
-    @app.post("/v1/solutions/search", dependencies=auth)
-    async def search(body: dict = Body(...)):
-        return await run_in_threadpool(control_plane.search_solutions, body["user_id"], body["query"])
-
-    @app.post("/v1/solutions/execute", dependencies=auth)
-    async def execute(body: dict = Body(...)):
-        return await run_in_threadpool(
-            control_plane.execute_solution, body["user_id"], body["solution_id"], body.get("command"))
-
-    @app.post("/v1/admin/cleanup-stale", dependencies=auth)
-    async def cleanup():
-        return {"count": await run_in_threadpool(control_plane.cleanup_stale_sessions)}
+    # (OpenCode solutions-archive + stale-session cleanup routes removed.)
 
     # --- file API (confined per-user) ---
     import threading
