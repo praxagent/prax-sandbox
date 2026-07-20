@@ -1,41 +1,29 @@
-"""Sandbox code execution service using Docker + OpenCode.
+"""Sandbox code-execution service — Docker exec primitives.
 
 The sandbox is an always-on (persistent) container running 24/7 alongside the
-app. Sessions are created inside the shared container via the OpenCode HTTP API,
-and system packages can be installed via ``docker exec``.
+app. This module is the control plane for **execution**: run a shell command or
+an argv in the container, install packages, probe liveness, and rebuild the
+image. Path translation between the host's workspace layout and the sandbox
+mount stays on the harness side.
 
-The control plane is harness-free: it reads a :class:`SandboxConfig`
-(see :mod:`prax_sandbox_client.config`) and side effects (live-output streaming,
-workspace persistence) are injected as callbacks. ``configure()`` sets the
-active config; absent that, built-in defaults are used (a local per-user archive
-dir, no live-output, no commit).
+History: this module also drove OpenCode *coding sessions* (start/send/review/
+finish/abort + a solutions archive) over the OpenCode HTTP API on :4096. Those
+were REMOVED (2026-07) — the sandbox is a pure execution environment and the
+harness codes with its own tools; the image no longer ships a coding-agent
+server or any model key. See prax `docs/security/sandbox-execution-boundary.md`.
 """
 from __future__ import annotations
 
-import contextlib
-import json
 import logging
 import os
 import re
 import subprocess
-import threading
 import time
-import uuid
-from contextvars import ContextVar
-from dataclasses import dataclass, field
-
-import requests
-from requests.auth import HTTPBasicAuth
 
 from prax_sandbox.exec import exec_in_sandbox, find_sandbox_container
 from prax_sandbox_client.config import SandboxConfig
 
 logger = logging.getLogger(__name__)
-
-
-# ---------------------------------------------------------------------------
-# Configuration — injected by the harness via configure()
-# ---------------------------------------------------------------------------
 
 _config: SandboxConfig | None = None
 
@@ -70,22 +58,6 @@ def _noop_commit(root: str, message: str) -> None:
     return
 
 
-# Per-call live-output sink. When set (via output_to), it overrides
-# cfg.on_output for the duration of one call — the daemon uses this to stream a
-# send_message's incremental output to the remote client over SSE.
-_output_sink: ContextVar = ContextVar("_sandbox_output_sink", default=None)
-
-
-@contextlib.contextmanager
-def output_to(sink):
-    """Route this call's live output to *sink* (a ``text -> None`` callable)."""
-    token = _output_sink.set(sink)
-    try:
-        yield
-    finally:
-        _output_sink.reset(token)
-
-
 # ---------------------------------------------------------------------------
 # Lazy Docker import — not every deployment needs Docker
 # ---------------------------------------------------------------------------
@@ -106,386 +78,8 @@ def _get_docker_client():
 
 
 # ---------------------------------------------------------------------------
-# Session state
+# Package installation
 # ---------------------------------------------------------------------------
-
-@dataclass
-class SandboxSession:
-    session_id: str
-    user_id: str
-    model: str
-    created_at: float
-    opencode_session_id: str | None = None
-    timeout_timer: threading.Timer | None = field(default=None, repr=False)
-    status: str = "starting"  # starting | running | finished | aborted | timed_out
-    rounds_used: int = 0
-    max_rounds: int = 10
-    consecutive_failures: int = 0
-
-
-_sessions: dict[str, SandboxSession] = {}
-_user_sessions: dict[str, list[str]] = {}  # user_id -> list of active session_ids (newest last)
-_lock = threading.Lock()
-
-
-def _resolve_session(user_id: str, session_id: str | None = None) -> tuple[SandboxSession | None, str]:
-    """Find a session by explicit ID or fall back to the user's most recent.
-
-    Returns (session, error_message).  If session is None, error_message
-    explains why.
-    """
-    with _lock:
-        if session_id:
-            session = _sessions.get(session_id)
-            if not session:
-                return None, f"Session {session_id[:12]} not found."
-            return session, ""
-        ids = _user_sessions.get(user_id, [])
-        if not ids:
-            return None, "No active sandbox session."
-        # Most recent is last
-        for sid in reversed(ids):
-            s = _sessions.get(sid)
-            if s and s.status == "running":
-                return s, ""
-        return None, "No running sandbox session."
-
-
-def _remove_user_session(user_id: str, session_id: str) -> None:
-    """Remove a session from the per-user list and the global map."""
-    _sessions.pop(session_id, None)
-    ids = _user_sessions.get(user_id, [])
-    if session_id in ids:
-        ids.remove(session_id)
-    if not ids:
-        _user_sessions.pop(user_id, None)
-
-
-# ---------------------------------------------------------------------------
-# OpenCode config helpers
-# ---------------------------------------------------------------------------
-
-_SANDBOX_CONTAINER_PORT = 4096
-_OPENCODE_INSTRUCTIONS = (
-    "You are a coding agent inside a sandboxed environment. "
-    "Write clean, well-documented code. Test your work by running it. "
-    "When you are done, summarize what you built and how to use it."
-)
-
-
-# ---------------------------------------------------------------------------
-# OpenCode HTTP API helpers
-# ---------------------------------------------------------------------------
-
-def _api_url(session: SandboxSession, path: str) -> str:
-    return f"http://{_cfg().host}:{_SANDBOX_CONTAINER_PORT}{path}"
-
-
-def _oc_auth() -> HTTPBasicAuth | None:
-    """Basic Auth credentials for OpenCode server requests.
-
-    ``None`` today (the persistent sandbox sets no password). The remote control
-    daemon will set ``opencode_password`` on the config to require a token.
-    """
-    password = _cfg().opencode_password
-    if password:
-        return HTTPBasicAuth("opencode", password)
-    return None
-
-
-def _wait_for_ready(session: SandboxSession, timeout: float = 30) -> tuple[bool, str]:
-    """Poll the OpenCode health endpoint until ready or timeout.
-
-    Returns (success, detail) — *detail* is empty on success and describes
-    the last error on failure.
-    """
-    deadline = time.time() + timeout
-    last_error = "no response within timeout"
-    while time.time() < deadline:
-        try:
-            r = requests.get(_api_url(session, "/global/health"), auth=_oc_auth(), timeout=2)
-            if r.status_code == 200:
-                return True, ""
-            last_error = f"health endpoint returned HTTP {r.status_code}"
-        except requests.ConnectionError as e:
-            last_error = f"connection refused ({e})"
-        except Exception as e:
-            last_error = str(e)
-        time.sleep(1)
-    return False, last_error
-
-
-def _create_opencode_session(session: SandboxSession, task: str) -> tuple[str | None, str]:
-    """Create an OpenCode session. The task is used as the title only;
-    the first real prompt is sent via send_message / _send_opencode_message.
-
-    Returns (session_id, error_detail).  *error_detail* is empty on success.
-    """
-    try:
-        r = requests.post(
-            _api_url(session, "/session"),
-            json={"title": task[:80]},
-            auth=_oc_auth(),
-            timeout=30,
-        )
-        if r.status_code >= 400:
-            body = r.text[:300]
-            logger.error(
-                "OpenCode session creation failed HTTP %d for %s: %s",
-                r.status_code, session.session_id, body,
-            )
-            return None, f"HTTP {r.status_code}: {body}"
-        data = r.json()
-        oc_id = data.get("id") or data.get("session_id")
-        if not oc_id:
-            logger.error("No session ID in OpenCode response: %s", data)
-            return None, f"OpenCode returned no session ID (response: {str(data)[:200]})"
-        return oc_id, ""
-    except Exception as e:
-        logger.exception("Failed to create OpenCode session for %s", session.session_id)
-        return None, str(e)
-
-
-def _push_sandbox_live(session: SandboxSession, text: str) -> None:
-    """Push incremental live output — to the per-call sink if set (daemon SSE),
-    else the configured host callback."""
-    sink = _output_sink.get()
-    if sink is not None:
-        try:
-            sink(text)
-        except Exception:
-            pass
-        return
-    cb = _cfg().on_output
-    if cb is None:
-        return
-    try:
-        cb("Sandbox Agent", text)
-    except Exception:
-        pass  # best-effort — don't break the poll loop
-
-
-def _send_opencode_message(session: SandboxSession, message: str, model: str | None = None) -> dict:
-    """Send a message to the OpenCode session (async + poll)."""
-    oc_id = session.opencode_session_id
-
-    # The user's files live under /workspace/active (the shared mount).
-    instructions = f"{_OPENCODE_INSTRUCTIONS} The user's files are at /workspace/active. Work there."
-
-    payload: dict = {
-        "parts": [{"type": "text", "text": message}],
-        "system": instructions,
-    }
-    if model:
-        payload["model"] = model
-
-    # Snapshot current message count so we know when a new response arrives
-    try:
-        r = requests.get(
-            _api_url(session, f"/session/{oc_id}/message"),
-            auth=_oc_auth(),
-            timeout=10,
-        )
-        before_count = len(r.json()) if r.status_code == 200 else 0
-    except Exception:
-        before_count = 0
-
-    # Send async — returns 204 immediately
-    try:
-        r = requests.post(
-            _api_url(session, f"/session/{oc_id}/prompt_async"),
-            json=payload,
-            auth=_oc_auth(),
-            timeout=10,
-        )
-        if r.status_code not in (200, 204):
-            return {"error": f"Failed to send message: HTTP {r.status_code}"}
-    except Exception as e:
-        logger.exception("Failed to send message to sandbox %s", session.session_id)
-        return {"error": str(e)}
-
-    # Poll for the assistant's response (up to 5 min)
-    deadline = time.time() + 300
-    poll_errors = 0
-    last_poll_error = ""
-    poll_count = 0
-    last_streamed_len = 0  # track how much partial output we've already pushed
-    while time.time() < deadline:
-        time.sleep(5)
-        poll_count += 1
-        try:
-            r = requests.get(
-                _api_url(session, f"/session/{oc_id}/message"),
-                auth=_oc_auth(),
-                timeout=10,
-            )
-            if r.status_code != 200:
-                poll_errors += 1
-                last_poll_error = f"HTTP {r.status_code}: {r.text[:200]}"
-                logger.warning(
-                    "Poll error for sandbox %s: %s", session.session_id[:12], last_poll_error,
-                )
-                if poll_errors >= 10:
-                    return {
-                        "error": (
-                            f"Sandbox polling failed {poll_errors} times. "
-                            f"Last error: {last_poll_error}"
-                        ),
-                    }
-                continue
-            messages = r.json()
-            if not isinstance(messages, list) or len(messages) <= before_count:
-                # Push periodic status so live output isn't empty
-                if poll_count % 6 == 0:  # every ~30s
-                    elapsed = int(time.time() - (deadline - 300))
-                    _push_sandbox_live(session, f"  ⏳ Waiting for coding agent ({elapsed}s)...\n")
-                continue
-            # Find the latest assistant message
-            last = messages[-1]
-            info = last.get("info", {})
-            if info.get("role") != "assistant":
-                continue
-
-            # Stream partial output as it arrives (before completion)
-            parts = last.get("parts", [])
-            partial_text = "\n".join(
-                p.get("text", "") for p in parts if p.get("type") == "text"
-            )
-            if partial_text and len(partial_text) > last_streamed_len:
-                new_chunk = partial_text[last_streamed_len:]
-                _push_sandbox_live(session, new_chunk)
-                last_streamed_len = len(partial_text)
-
-            if not info.get("time", {}).get("completed"):
-                continue  # still streaming
-            # Extract final text from parts
-            text = partial_text
-            return {"response": text or "(no text output)", "raw": last}
-        except requests.ConnectionError as e:
-            poll_errors += 1
-            last_poll_error = f"connection lost ({e})"
-            logger.warning("Poll connection error for sandbox %s: %s", session.session_id[:12], e)
-        except Exception as e:
-            poll_errors += 1
-            last_poll_error = str(e)
-            logger.warning("Poll exception for sandbox %s: %s", session.session_id[:12], e)
-
-        if poll_errors >= 10:
-            return {
-                "error": (
-                    f"Sandbox polling failed {poll_errors} times. "
-                    f"Last error: {last_poll_error}"
-                ),
-            }
-
-    elapsed_poll = int(300 - max(0, deadline - time.time()))
-    return {
-        "error": (
-            f"Sandbox timed out waiting for response ({elapsed_poll}s). "
-            f"The coding agent may still be running. "
-            f"Poll errors during wait: {poll_errors}."
-        ),
-    }
-
-
-def _get_opencode_session(session: SandboxSession) -> dict:
-    """Get the current OpenCode session state."""
-    oc_id = session.opencode_session_id
-    try:
-        r = requests.get(_api_url(session, f"/session/{oc_id}"), auth=_oc_auth(), timeout=10)
-        r.raise_for_status()
-        return r.json()
-    except Exception as e:
-        logger.exception("Failed to get sandbox session %s", session.session_id)
-        return {"error": str(e)}
-
-
-def _export_opencode_session(session: SandboxSession) -> dict | None:
-    """Export the OpenCode session for archival."""
-    oc_id = session.opencode_session_id
-    try:
-        r = requests.get(_api_url(session, f"/session/{oc_id}/message"), auth=_oc_auth(), timeout=10)
-        r.raise_for_status()
-        return r.json()
-    except Exception:
-        logger.exception("Failed to export session %s", session.session_id)
-        return None
-
-
-# ---------------------------------------------------------------------------
-# Workspace integration
-# ---------------------------------------------------------------------------
-
-def _workspace_root(user_id: str) -> str:
-    safe_id = user_id.lstrip("+")
-    return os.path.abspath(os.path.join(_cfg().workspace_dir, safe_id))
-
-
-def _solutions_dir(user_id: str) -> str:
-    return os.path.join(_workspace_root(user_id), "archive", "code")
-
-
-def _archive_solution(session: SandboxSession, summary: str = "") -> str:
-    """Archive sandbox artifacts to the user's workspace via host callbacks."""
-    cfg = _cfg()
-    resolve = cfg.resolve_workspace or _builtin_resolve_workspace
-    commit = cfg.commit or _noop_commit
-
-    root = resolve(session.user_id)
-    dest = os.path.join(root, "archive", "code", session.session_id[:12])
-    os.makedirs(dest, exist_ok=True)
-
-    # Sandbox output lands directly in active/ (shared mount), so no file copy needed.
-
-    # Write SOLUTION.md
-    solution_md = (
-        f"## Solution: {session.session_id[:12]}\n\n"
-        f"- **Session ID**: {session.session_id}\n"
-        f"- **Model**: {session.model}\n"
-        f"- **Date**: {time.strftime('%Y-%m-%d %H:%M')}\n"
-        f"- **Duration**: {int(time.time() - session.created_at)}s\n\n"
-    )
-    if summary:
-        solution_md += f"### Summary\n\n{summary}\n\n"
-    with open(os.path.join(dest, "SOLUTION.md"), "w") as f:
-        f.write(solution_md)
-
-    # Export and save OpenCode session log
-    session_log = _export_opencode_session(session)
-    if session_log:
-        with open(os.path.join(dest, "session_log.json"), "w") as f:
-            json.dump(session_log, f, indent=2)
-
-    commit(root, f"Sandbox solution: {session.session_id[:12]}")
-    logger.info("Archived sandbox solution %s for %s", session.session_id[:12], session.user_id)
-    return dest
-
-
-# ---------------------------------------------------------------------------
-# Session lifecycle
-# ---------------------------------------------------------------------------
-
-def _on_timeout(session_id: str) -> None:
-    """Timer callback — abort the session on timeout."""
-    with _lock:
-        session = _sessions.get(session_id)
-        if session and session.status == "running":
-            elapsed = int(time.time() - session.created_at)
-            logger.warning(
-                "Sandbox session %s timed out after %ds "
-                "(%d/%d rounds used, user=%s, model=%s)",
-                session_id[:12], elapsed,
-                session.rounds_used, session.max_rounds,
-                session.user_id, session.model,
-            )
-            session.status = "timed_out"
-            _remove_user_session(session.user_id, session_id)
-
-
-# ---------------------------------------------------------------------------
-# Package installation (persistent mode)
-# ---------------------------------------------------------------------------
-
 def install_package(package_name: str) -> dict:
     """Install a system package in the sandbox container.
 
@@ -519,7 +113,6 @@ def install_package(package_name: str) -> dict:
         if exit_code != 0:
             return {"error": f"apt-get failed (exit {exit_code}): {stderr[-500:]}"}
         # Track installed package in a manifest for rebuild reproducibility.
-        # The manifest lives in the persistent home dir so it survives rebuilds.
         try:
             container.exec_run(
                 ["sh", "-c", f'echo "{package_name}" >> /root/.installed_packages'],
@@ -554,7 +147,6 @@ def _track_installed_packages(command: str, exit_code: int) -> None:
         m = re.search(r"pip3?\s+install\s+(?:-\S+\s+)*(.+)", command)
         if m:
             pkgs = re.findall(r"[a-zA-Z0-9][a-zA-Z0-9._-]+", m.group(1))
-            # Filter out flags and paths
             pkgs = [p for p in pkgs if not p.startswith("-") and "/" not in p]
             for pkg in pkgs:
                 container.exec_run(["sh", "-c", f'echo "{pkg}" >> /root/.installed_pip_packages'])
@@ -573,13 +165,13 @@ def _track_installed_packages(command: str, exit_code: int) -> None:
         pass  # best-effort
 
 
+# ---------------------------------------------------------------------------
+# Execution primitives
+# ---------------------------------------------------------------------------
 def run_shell(command: str, timeout: int = 60) -> dict:
     """Run a shell command directly in the sandbox container.
 
-    This bypasses OpenCode entirely — no AI coding agent, no session, no
-    polling.  Use for simple commands like ``ls``, ``df -h``, ``pwd``,
-    ``cat file.txt``, etc.
-
+    Use for any shell command: ``ls``, ``df -h``, ``python3 …``, ``git`` …
     Returns dict with ``stdout``, ``stderr``, ``exit_code``.
     """
     try:
@@ -612,308 +204,25 @@ def run_command(
 
 
 # ---------------------------------------------------------------------------
-# Public API
+# Liveness + lifecycle
 # ---------------------------------------------------------------------------
+def _container_ready(timeout: float = 3.0) -> bool:
+    """True if the container is up and can execute a trivial command.
 
-def start_session(
-    user_id: str,
-    task: str,
-    model: str | None = None,
-) -> dict:
-    """Start a new sandbox coding session in the persistent container.
-
-    Returns dict with session_id, status, model.
+    Replaces the old OpenCode health probe (curling :4096) — there is no
+    coding-agent server anymore; liveness = 'can I docker-exec into it'.
     """
-    cfg = _cfg()
-    model = model or cfg.default_model
-
-    with _lock:
-        if len(_sessions) >= cfg.max_concurrent:
-            return {"error": "Maximum concurrent sandbox sessions reached. Try again later."}
-
-    session_id = str(uuid.uuid4())
-
-    active_workspace = os.path.join(_workspace_root(user_id), "active")
-    os.makedirs(active_workspace, exist_ok=True)
-
-    session = SandboxSession(
-        session_id=session_id,
-        user_id=user_id,
-        model=model,
-        created_at=time.time(),
-        max_rounds=cfg.max_rounds,
-    )
-
-    ready, ready_detail = _wait_for_ready(session, timeout=10)
-    if not ready:
-        return {"error": f"Persistent sandbox is not responding ({ready_detail}). Check docker-compose logs."}
-
-    session.status = "running"
-
-    oc_session_id, oc_error = _create_opencode_session(session, task)
-    if not oc_session_id:
-        return {"error": f"Failed to create coding session inside the sandbox: {oc_error}"}
-    session.opencode_session_id = oc_session_id
-
-    # Start timeout timer
-    timer = threading.Timer(cfg.timeout, _on_timeout, args=[session_id])
-    timer.daemon = True
-    timer.start()
-    session.timeout_timer = timer
-
-    with _lock:
-        _sessions[session_id] = session
-        _user_sessions.setdefault(user_id, []).append(session_id)
-
-    logger.info("Started sandbox session %s for %s (model=%s)", session_id[:12], user_id, model)
-    return {"session_id": session_id, "status": "running", "model": model}
-
-
-def send_message(user_id: str, message: str, model: str | None = None, session_id: str | None = None) -> dict:
-    """Send a message to a sandbox session (defaults to most recent)."""
-    session, err = _resolve_session(user_id, session_id)
-    if not session:
-        return {"error": err}
-    session_id = session.session_id
-
-    if session.rounds_used >= session.max_rounds:
-        remaining_action = "Use sandbox_finish to save what you have, or sandbox_abort to discard."
-        return {
-            "error": (
-                f"Sandbox has reached the maximum of {session.max_rounds} message rounds. "
-                f"{remaining_action}"
-            ),
-            "rounds_used": session.rounds_used,
-            "max_rounds": session.max_rounds,
-        }
-
-    if model and model != session.model:
-        session.model = model
-        logger.info("Switched sandbox %s to model %s", session_id[:12], model)
-
-    response = _send_opencode_message(session, message, model=model)
-
-    # Only count the round if the message was actually processed.
-    if "error" in response:
-        session.consecutive_failures += 1
-        logger.warning(
-            "Sandbox %s message failed (consecutive=%d): %s",
-            session_id[:12], session.consecutive_failures, response["error"],
-        )
-        # Auto-abort after 3 consecutive failures — the session is stuck.
-        if session.consecutive_failures >= 3:
-            logger.error(
-                "Sandbox %s auto-aborting after %d consecutive failures",
-                session_id[:12], session.consecutive_failures,
-            )
-            return {
-                "error": (
-                    f"Sandbox session auto-aborted after {session.consecutive_failures} "
-                    f"consecutive failures. The coding agent appears stuck. "
-                    f"Last error: {response['error']}"
-                ),
-                "auto_aborted": True,
-            }
-    else:
-        session.rounds_used += 1
-        session.consecutive_failures = 0  # Reset on success.
-
-    rounds_left = session.max_rounds - session.rounds_used
-    return {
-        "session_id": session_id,
-        "model": session.model,
-        "response": response,
-        "rounds_used": session.rounds_used,
-        "rounds_remaining": rounds_left,
-    }
-
-
-def review_session(user_id: str, session_id: str | None = None) -> dict:
-    """Get status and details of a sandbox session (defaults to most recent)."""
-    session, err = _resolve_session(user_id, session_id)
-    if not session:
-        return {"error": err}
-    session_id = session.session_id
-
-    elapsed = int(time.time() - session.created_at)
-    oc_state = _get_opencode_session(session)
-
-    # List files in the session workspace
-    session_workspace = os.path.join(_workspace_root(user_id), "active", "sessions", session_id)
-    files = []
-    if os.path.isdir(session_workspace):
-        for root_dir, _dirs, filenames in os.walk(session_workspace):
-            for fname in filenames:
-                rel = os.path.relpath(os.path.join(root_dir, fname), session_workspace)
-                files.append(rel)
-
-    return {
-        "session_id": session_id,
-        "status": session.status,
-        "model": session.model,
-        "elapsed_seconds": elapsed,
-        "timeout_seconds": _cfg().timeout,
-        "rounds_used": session.rounds_used,
-        "rounds_remaining": session.max_rounds - session.rounds_used,
-        "files": sorted(files),
-        "opencode_state": oc_state,
-    }
-
-
-def finish_session(user_id: str, summary: str = "", session_id: str | None = None) -> dict:
-    """Finish a sandbox session, archiving artifacts to the workspace."""
-    session, err = _resolve_session(user_id, session_id)
-    if not session:
-        return {"error": err}
-    session_id = session.session_id
-
-    # Cancel timeout
-    if session.timeout_timer:
-        session.timeout_timer.cancel()
-
-    # Archive artifacts
-    try:
-        archive_path = _archive_solution(session, summary)
-    except Exception:
-        logger.exception("Failed to archive sandbox %s", session_id[:12])
-        archive_path = None
-
-    session.status = "finished"
-
-    with _lock:
-        _remove_user_session(user_id, session_id)
-
-    logger.info("Finished sandbox %s for %s", session_id[:12], user_id)
-    return {
-        "session_id": session_id,
-        "status": "finished",
-        "archived_path": archive_path,
-    }
-
-
-def abort_session(user_id: str, session_id: str | None = None) -> dict:
-    """Abort a sandbox session without archiving (defaults to most recent)."""
-    session, err = _resolve_session(user_id, session_id)
-    if not session:
-        return {"error": err}
-    session_id = session.session_id
-
-    if session.timeout_timer:
-        session.timeout_timer.cancel()
-
-    elapsed = int(time.time() - session.created_at)
-    session.status = "aborted"
-
-    with _lock:
-        _remove_user_session(user_id, session_id)
-
-    logger.warning(
-        "Aborted sandbox %s for %s after %ds (%d/%d rounds used, model=%s)",
-        session_id[:12], user_id, elapsed,
-        session.rounds_used, session.max_rounds, session.model,
-    )
-    return {
-        "session_id": session_id,
-        "status": "aborted",
-        "elapsed_seconds": elapsed,
-        "rounds_used": session.rounds_used,
-    }
-
-
-def search_solutions(user_id: str, query: str) -> list[dict]:
-    """Search past sandbox solutions in the workspace archive."""
-    code_dir = _solutions_dir(user_id)
-    if not os.path.isdir(code_dir):
-        return []
-
-    results = []
-    try:
-        proc = subprocess.run(
-            ["grep", "-ril", "--include=SOLUTION.md", "--", query, code_dir],
-            capture_output=True, text=True, timeout=10,
-        )
-        for filepath in proc.stdout.strip().splitlines():
-            if not filepath:
-                continue
-            solution_dir = os.path.dirname(filepath)
-            session_short = os.path.basename(solution_dir)
-            snippet_proc = subprocess.run(
-                ["grep", "-i", "-m", "5", "-C", "1", "--", query, filepath],
-                capture_output=True, text=True, timeout=5,
-            )
-            results.append({
-                "session_id": session_short,
-                "path": solution_dir,
-                "snippet": snippet_proc.stdout.strip()[:500],
-            })
-    except subprocess.TimeoutExpired:
-        logger.warning("Solution search timed out for %s query '%s'", user_id, query)
-    return results
-
-
-def execute_solution(user_id: str, solution_id: str, command: str | None = None) -> dict:
-    """Re-execute a known solution from the archive in a fresh container.
-
-    If command is not provided, looks for a build.sh or main.py in the solution dir.
-    """
-    code_dir = _solutions_dir(user_id)
-    solution_dir = os.path.join(code_dir, solution_id)
-    if not os.path.isdir(solution_dir):
-        return {"error": f"Solution '{solution_id}' not found in archive."}
-
-    # Read SOLUTION.md for context
-    solution_md = os.path.join(solution_dir, "SOLUTION.md")
-    context = ""
-    if os.path.isfile(solution_md):
-        with open(solution_md) as f:
-            context = f.read()
-
-    # Start a new session with the solution context
-    task = (
-        f"Re-execute a previously archived solution.\n\n"
-        f"Solution archive contents are available at /workspace.\n\n"
-        f"Previous solution context:\n{context}\n\n"
-    )
-    if command:
-        task += f"Run this command: {command}"
-    else:
-        task += "Look for build.sh, main.py, or similar entry point and run it."
-
-    return start_session(user_id, task)
-
-
-def cleanup_stale_sessions() -> int:
-    """Clear stale in-memory session state. Call on app startup.
-
-    The persistent sandbox container is managed externally (docker-compose / the
-    control daemon), so there is nothing to tear down — only the in-memory
-    bookkeeping is reset.
-    """
-    with _lock:
-        count = len(_sessions)
-        _sessions.clear()
-        _user_sessions.clear()
-    if count:
-        logger.info("Cleared %d stale in-memory sandbox sessions", count)
-    return count
-
-
-def get_active_session(user_id: str) -> SandboxSession | None:
-    """Return the user's most recent active session, or None."""
-    with _lock:
-        ids = _user_sessions.get(user_id, [])
-        for sid in reversed(ids):
-            s = _sessions.get(sid)
-            if s and s.status == "running":
-                return s
-    return None
-
-
-def get_active_sessions(user_id: str) -> list[SandboxSession]:
-    """Return all active sessions for a user."""
-    with _lock:
-        ids = _user_sessions.get(user_id, [])
-        return [_sessions[sid] for sid in ids if sid in _sessions]
+    deadline = time.time() + max(0.0, timeout)
+    while True:
+        try:
+            r = exec_in_sandbox(["true"], timeout=5, config=_cfg())
+            if r.returncode == 0:
+                return True
+        except Exception:
+            pass
+        if time.time() >= deadline:
+            return False
+        time.sleep(0.5)
 
 
 def get_runtime_mode() -> str:
@@ -922,10 +231,8 @@ def get_runtime_mode() -> str:
 
 
 def health() -> bool:
-    """Return True if the persistent sandbox's OpenCode API is reachable."""
-    probe = SandboxSession(session_id="health", user_id="system", model="", created_at=time.time())
-    ok, _ = _wait_for_ready(probe, timeout=3)
-    return ok
+    """Return True if the persistent sandbox container is reachable/executable."""
+    return _container_ready(timeout=3)
 
 
 def rebuild_sandbox(dockerfile_content: str | None = None) -> dict:
@@ -933,8 +240,6 @@ def rebuild_sandbox(dockerfile_content: str | None = None) -> dict:
 
     Only works in persistent (docker-compose) mode. If *dockerfile_content*
     is provided, it overwrites ``sandbox/Dockerfile`` before building.
-
-    This enables Prax to permanently add packages by editing the Dockerfile.
     """
     if not _cfg().persistent:
         return {"error": "Sandbox rebuild is only available in Docker deployment mode."}
@@ -944,8 +249,8 @@ def rebuild_sandbox(dockerfile_content: str | None = None) -> dict:
     except Exception as e:
         return {"error": f"Docker not available: {e}"}
 
-    # Optionally update the Dockerfile.  __file__ is prax_sandbox/control_plane.py,
-    # so two dirnames up is the repo root that holds sandbox/.
+    # __file__ is prax_sandbox/control_plane.py, so two dirnames up is the repo
+    # root that holds sandbox/.
     sandbox_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "sandbox")
     if dockerfile_content:
         dockerfile_path = os.path.join(sandbox_dir, "Dockerfile")
@@ -972,13 +277,8 @@ def rebuild_sandbox(dockerfile_content: str | None = None) -> dict:
     except Exception as e:
         return {"error": f"Failed to restart sandbox container: {e}"}
 
-    # Wait for the sandbox to come back up.
-    dummy_session = SandboxSession(
-        session_id="rebuild-check", user_id="system",
-        model="", created_at=time.time(),
-    )
-    ready, ready_detail = _wait_for_ready(dummy_session, timeout=60)
-    if not ready:
-        return {"error": f"Sandbox rebuilt but failed to become healthy within 60s: {ready_detail}"}
+    # Wait for the sandbox to come back up (exec probe, not OpenCode).
+    if not _container_ready(timeout=60):
+        return {"error": "Sandbox rebuilt but failed to become executable within 60s."}
 
     return {"status": "rebuilt", "image": _cfg().image}

@@ -26,21 +26,9 @@ class SandboxClient:
         if config is not None:
             self._t.configure(config)
 
-    # --- Session lifecycle ---
-    def start_session(self, user_id, task, model=None):
-        return self._t.start_session(user_id, task, model=model)
-
-    def send_message(self, user_id, message, model=None, session_id=None):
-        return self._t.send_message(user_id, message, model=model, session_id=session_id)
-
-    def review_session(self, user_id, session_id=None):
-        return self._t.review_session(user_id, session_id=session_id)
-
-    def finish_session(self, user_id, summary="", session_id=None):
-        return self._t.finish_session(user_id, summary=summary, session_id=session_id)
-
-    def abort_session(self, user_id, session_id=None):
-        return self._t.abort_session(user_id, session_id=session_id)
+    # (OpenCode coding-SESSION methods — start/send/review/finish/abort +
+    #  search/execute solutions + get_active_session(s)/cleanup — were removed
+    #  with the coding-agent CLIs. The sandbox is a pure execution environment.)
 
     # --- Shell / packages ---
     def run_shell(self, command, timeout=60):
@@ -62,25 +50,9 @@ class SandboxClient:
     def rebuild_sandbox(self, dockerfile_content=None):
         return self._t.rebuild_sandbox(dockerfile_content)
 
-    # --- Solutions archive ---
-    def search_solutions(self, user_id, query):
-        return self._t.search_solutions(user_id, query)
-
-    def execute_solution(self, user_id, solution_id, command=None):
-        return self._t.execute_solution(user_id, solution_id, command=command)
-
     # --- Introspection ---
-    def get_active_session(self, user_id):
-        return self._t.get_active_session(user_id)
-
-    def get_active_sessions(self, user_id):
-        return self._t.get_active_sessions(user_id)
-
     def get_runtime_mode(self):
         return self._t.get_runtime_mode()
-
-    def cleanup_stale_sessions(self):
-        return self._t.cleanup_stale_sessions()
 
     def health(self) -> bool:
         """Best-effort: is the sandbox reachable right now?"""
