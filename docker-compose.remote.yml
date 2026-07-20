@@ -18,13 +18,9 @@ services:
   sandbox:
     image: prax-sandbox:latest          # built from ./sandbox (make build)
     restart: unless-stopped
-    environment:
-      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
-      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
-      - CLAUDE_CODE_DISABLE_NONINTERACTIVE_CHECK=1
-      # OpenCode requires this password; the daemon holds the same value and
-      # sends it. It is NEVER exposed to clients (port 4096 is internal-only).
-      - OPENCODE_SERVER_PASSWORD=${OPENCODE_SERVER_PASSWORD:?set a strong secret}
+    # No model API keys / OpenCode password by default — the AI coding-agent CLIs
+    # were removed from the image (pure execution environment). A user who
+    # reinstalls a coding-agent CLI manages its own DEDICATED, spend-capped key.
     volumes:
       - ${WORKSPACE_DIR:-./workspace}:/workspace
     networks: [sandboxnet]
