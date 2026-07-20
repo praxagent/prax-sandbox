@@ -2,10 +2,21 @@
 
 [← prax-sandbox docs](README.md)
 
+> ⚠️ **2026-07 change — the AI coding-agent CLIs were removed.** The image no
+> longer ships `opencode`, `@anthropic-ai/claude-code`, or `@openai/codex`, no
+> longer runs the OpenCode server (`:4096`), and no longer takes model API keys
+> in its environment. The sandbox is now a **pure execution environment** (shell,
+> Python + scientific stack, DuckDB, Lean, browser, desktop); the harness codes
+> directly with its own tools. A user who wants a coding-agent CLI installs it
+> themselves and manages its own (dedicated, spend-capped) key. **The
+> OpenCode-driven sections below (`opencode serve`, `delegate_sandbox` sessions,
+> the coding-session lifecycle) are historical / opt-in-only and pending a
+> rewrite.** Rationale: prax `docs/security/sandbox-execution-boundary.md`.
+
 > Part of **prax-sandbox**. This documents the sandbox's internals (the container,
-> OpenCode, the image). The agent-facing tools that *drive* it (`delegate_sandbox`,
-> `run_python`, `sandbox_*`) live in the harness that consumes the sandbox — for the
-> reference integration see the Prax repo (`docs/infrastructure/sandbox.md`).
+> the image). The agent-facing tools that *drive* it (`run_python`, `sandbox_*`,
+> `data_query`) live in the harness that consumes the sandbox — for the reference
+> integration see the Prax repo (`docs/infrastructure/sandbox.md`).
 
 ### The Problem
 

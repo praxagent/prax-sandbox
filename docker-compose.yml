@@ -9,22 +9,23 @@ services:
       context: ./sandbox
     image: prax-sandbox:latest
     restart: unless-stopped
-    environment:
-      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
-      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
-      - CLAUDE_CODE_DISABLE_NONINTERACTIVE_CHECK=1
+    # No model API keys are passed into the sandbox by default. The AI
+    # coding-agent CLIs were removed, so nothing here calls a model — and a
+    # keyless container closes the credential-exfiltration surface (a code-exec
+    # tool reading env keys + egress). A user who installs a coding-agent CLI
+    # themselves can add a DEDICATED, spend-capped key here — never the primary.
+    # See prax docs/security/sandbox-execution-boundary.md.
     # Bound to localhost only — these endpoints are UNAUTHENTICATED. Never
     # expose them to a network; for remote access run the daemon instead
     # (docker-compose.remote.yml).
     ports:
-      - "127.0.0.1:4096:4096"   # OpenCode HTTP API
       - "127.0.0.1:9223:9223"   # Chrome DevTools Protocol
       - "127.0.0.1:6080:6080"   # noVNC desktop
       - "127.0.0.1:6090:6090"   # clipboard bridge
     volumes:
       - ${WORKSPACE_DIR:-./workspace}:/workspace
     healthcheck:
-      test: ["CMD", "curl", "-sf", "http://localhost:4096/global/health"]
+      test: ["CMD-SHELL", "pgrep -x supervisord || exit 1"]
       interval: 5s
       timeout: 3s
       start_period: 15s

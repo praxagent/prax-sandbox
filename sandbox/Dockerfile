@@ -56,9 +56,16 @@ RUN echo 'export CHROMIUM_FLAGS="$CHROMIUM_FLAGS --enable-remote-extensions"' \
 # ── code-server (web-based VS Code, works on amd64 + arm64) ──
 RUN curl -fsSL https://code-server.dev/install.sh | sh
 
-# ── Coding agents ──
-RUN npm install -g opencode-ai @anthropic-ai/claude-code @openai/codex \
-    @mermaid-js/mermaid-cli
+# ── Diagram tooling (mermaid) ──
+# The AI coding-agent CLIs (opencode-ai / @anthropic-ai/claude-code /
+# @openai/codex) were REMOVED on purpose: the sandbox is a pure EXECUTION
+# environment, and Prax codes directly with its own tools (run_python,
+# workspace_save/patch with the syntax linter, source_read/grep, sandbox_shell)
+# rather than delegating to a black-box coding agent. Removing them also means
+# the sandbox needs NO model API key in its environment (closing that
+# exfiltration surface — see prax docs/security/sandbox-execution-boundary.md).
+# A user who wants a coding-agent CLI can `npm install -g` it themselves.
+RUN npm install -g @mermaid-js/mermaid-cli
 
 # Persistence + `exit` resilience now live in TeamWork's terminal
 # router (server-side session that outlives the WS) plus
@@ -103,10 +110,6 @@ RUN curl -fsSL https://elan.lean-lang.org/elan-init.sh -o /tmp/elan-init.sh \
 
 WORKDIR /workspace
 
-# Seed config — copied to /opt/ so it survives volume mounts.
-# The entrypoint seeds /root/.config/opencode/ on first run.
-COPY opencode.json /opt/opencode.json
-
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh
 COPY bash-respawn.sh /usr/local/bin/bash-respawn.sh
 COPY chromium-launch.sh /usr/local/bin/chromium-launch.sh
@@ -126,12 +129,15 @@ ENV SHELL=/bin/bash
 # commands (sandbox_shell, terminal sessions) can interact with the desktop.
 ENV DISPLAY=:99
 
-# 4096 = OpenCode serve, 6080 = noVNC web desktop, 6090 = clipboard bridge, 8443 = code-server.
+# 6080 = noVNC web desktop, 6090 = clipboard bridge, 8443 = code-server.
 # 9223 (raw CDP) is intentionally NOT exposed — reach Chrome only via the
 # authenticated daemon proxy (remote) or the internal docker network (local).
-EXPOSE 4096 6080 6090 8443
+# (4096 / OpenCode serve removed — no coding-agent server in the image.)
+EXPOSE 6080 6090 8443
 
+# Liveness = supervisord is up (it manages Xvfb/desktop/clipboard/code-server).
+# The old check curled OpenCode's :4096, which no longer exists.
 HEALTHCHECK --interval=3s --timeout=2s --start-period=15s --retries=5 \
-    CMD curl -sf http://localhost:4096/global/health > /dev/null || exit 1
+    CMD pgrep -x supervisord > /dev/null || exit 1
 
 CMD ["/usr/local/bin/entrypoint.sh"]

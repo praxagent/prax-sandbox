@@ -18,25 +18,9 @@ rm -f "$PROFILE_DIR"/SingletonLock "$PROFILE_DIR"/SingletonCookie "$PROFILE_DIR"
 rm -f /tmp/.X99-lock 2>/dev/null
 rm -f /tmp/.X11-unix/X99 2>/dev/null
 
-# Seed OpenCode config if the mounted volume is empty (first run).
-OPENCODE_CFG=/root/.config/opencode/opencode.json
-if [ ! -f "$OPENCODE_CFG" ]; then
-  mkdir -p "$(dirname "$OPENCODE_CFG")"
-  cp /opt/opencode.json "$OPENCODE_CFG"
-fi
-
-# Persist Claude Code config across container rebuilds.
-# Claude stores its main config at ~/.claude.json (a file outside ~/.claude/).
-# We symlink it into the persisted ~/.claude/ directory so it survives.
-CLAUDE_JSON=/root/.claude.json
-CLAUDE_DIR=/root/.claude
-mkdir -p "$CLAUDE_DIR"
-if [ -f "$CLAUDE_JSON" ] && [ ! -L "$CLAUDE_JSON" ]; then
-  mv "$CLAUDE_JSON" "$CLAUDE_DIR/claude.json"
-  ln -s "$CLAUDE_DIR/claude.json" "$CLAUDE_JSON"
-elif [ -f "$CLAUDE_DIR/claude.json" ] && [ ! -e "$CLAUDE_JSON" ]; then
-  ln -s "$CLAUDE_DIR/claude.json" "$CLAUDE_JSON"
-fi
+# (OpenCode + Claude Code config seeding/persistence removed — the AI
+#  coding-agent CLIs are no longer installed in the image. A user who installs
+#  one themselves manages its own config.)
 
 # ── Package install manifests ──
 # Packages installed via Prax (sandbox_install, sandbox_shell, run_python)
