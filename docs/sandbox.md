@@ -55,6 +55,13 @@ EXPOSE 4096
 CMD ["opencode", "serve", "--hostname", "0.0.0.0", "--port", "4096"]
 ```
 
+(The real image — `sandbox/Dockerfile` — also carries a persistent Python venv at
+`/opt/prax-venv` with `faster-whisper` (audio) and `duckdb` + `pandas` (the
+harness's opt-in `data_query` SQL tool), plus the Lean 4 toolchain at `/opt/elan`
+for `lean_check`. All three live under `/opt/` so the `/root` and `/workspace`
+volume mounts can't hide them, and each is addressed by absolute path from the
+consuming harness.)
+
 ### VS Code
 
 VS Code is installed in the sandbox via the Microsoft apt repository. It runs on the VNC desktop (Xvfb + Fluxbox) alongside Chromium and any other GUI apps. Prax can launch it with `desktop_open("code /workspace")` and interact with it programmatically via the desktop tools (screenshot, click, type). Users can also open VS Code directly from the noVNC iframe in TeamWork's Desktop tab.

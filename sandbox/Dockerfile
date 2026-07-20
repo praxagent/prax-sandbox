@@ -76,8 +76,14 @@ COPY --from=ghcr.io/astral-sh/uv@sha256:e49fde5daf002023f0a2e2643861ce9ca8a8da5b
 # Keep ad-hoc Python deps out of Debian's externally-managed system Python.
 # The entrypoint puts this venv on PATH; Prax can use it for temporary audio
 # transcription without writing artifacts into the user's workspace.
+#
+# duckdb + pandas back the governed `data_query` tool (DATA_TOOLS_ENABLED in
+# Prax): deterministic SQL/number-crunching over CSV/Parquet/JSON without a
+# whole coding session. The tool invokes /opt/prax-venv/bin/python explicitly
+# (like lean_check pins /opt/elan) so the deps resolve even under a docker-exec
+# shell that didn't inherit the venv on PATH. See prax's data_tools.py.
 RUN uv venv /opt/prax-venv --python python3 \
-    && uv pip install --python /opt/prax-venv/bin/python faster-whisper
+    && uv pip install --python /opt/prax-venv/bin/python faster-whisper duckdb pandas sympy
 
 # ── Lean 4 toolchain (elan → lean/lake) for the lean_check proof tool ──
 # Installed to /opt/elan, NOT the elan default ~/.elan — /root is volume-mounted
