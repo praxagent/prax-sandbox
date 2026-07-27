@@ -65,7 +65,24 @@ RUN curl -fsSL https://code-server.dev/install.sh | sh
 # the sandbox needs NO model API key in its environment (closing that
 # exfiltration surface — see prax docs/security/sandbox-execution-boundary.md).
 # A user who wants a coding-agent CLI can `npm install -g` it themselves.
+# mermaid-cli pulls puppeteer, which by default downloads ITS OWN Chrome — a
+# second ~150MB browser in an image that already installs Chromium above. It is
+# pure waste, and it broke the build outright: the download needs `unzip`, which
+# is not in this image, so puppeteer failed with "no zip archiver is available"
+# and took the whole image with it. (On a smaller box the same step OOMed
+# instead, which is the same waste wearing a different hat.)
+#
+# So skip the download and point puppeteer at the Chromium already here. Fewer
+# bytes, one browser, and no dependency on an archiver we never wanted.
+ENV PUPPETEER_SKIP_DOWNLOAD=true \
+    PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium
 RUN npm install -g @mermaid-js/mermaid-cli
+
+# mermaid runs Chromium as root inside a container, which it refuses to do
+# without --no-sandbox. Supplying the config here means callers just run `mmdc`
+# and it works, rather than each caller rediscovering the flag.
+RUN printf '{"args":["--no-sandbox","--disable-dev-shm-usage"]}\n' \
+      > /etc/puppeteer-config.json
 
 # Persistence + `exit` resilience now live in TeamWork's terminal
 # router (server-side session that outlives the WS) plus
