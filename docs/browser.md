@@ -2,9 +2,13 @@
 
 [← prax-sandbox docs](README.md)
 
-> Part of **prax-sandbox**: the headless Chrome + CDP the sandbox provides. The
+> Part of **prax-sandbox**: the Chromium + CDP the sandbox provides. The
 > harness-side browser integration (Playwright connection, the browser spoke,
-> local-chromium fallback) lives in the consuming harness (e.g. Prax).
+> local-chromium fallback) lives in the consuming harness (e.g. Prax). Everything
+> from *Authentic Browser Presentation* onward describes that Prax-side
+> integration (`prax/services/browser_service.py`, `prax/agent/cdp_tools.py` in
+> the Prax repo), not code in this repository; it is kept here for orientation
+> only and is not the authoritative description of the harness.
 
 ### Why a Live Browser?
 
@@ -12,11 +16,11 @@ Many websites (Twitter/X, SPAs, pages behind logins) return empty or broken HTML
 
 ### Architecture: One Chrome, Two APIs
 
-In Docker, the sandbox container runs a **headless Chromium** with remote debugging enabled (CDP on port 9222, forwarded to 9223 via socat).  **Three consumers share the same Chrome instance:**
+In Docker, the sandbox container runs a **non-headless Chromium** on the Xvfb display (`:99` — the same window the noVNC desktop shows; `sandbox/chromium-launch.sh` passes no `--headless`) with remote debugging enabled (CDP on port 9222 inside the container, forwarded to 9223 via socat).  **Three consumers share the same Chrome instance:**
 
 ```mermaid
 flowchart TD
-    Chrome["Sandbox Chrome\n(headless, CDP)\n:9222 → :9223"]
+    Chrome["Sandbox Chrome\n(on Xvfb :99, CDP)\n:9222 → :9223"]
     Chrome --> PW["Playwright\n(browser_*)\nRich API via\nconnect_over_cdp()"]
     Chrome --> CDP["Raw CDP\n(sandbox_browser\n_read/_act)"]
     Chrome --> TW["TeamWork\nScreencast\n(user sees browser live)"]
@@ -85,7 +89,7 @@ BROWSER_CDP_URL=http://sandbox:9223   # Playwright connects to sandbox Chrome
 #BROWSER_CDP_URL=
 ```
 
-When `BROWSER_CDP_URL` is set, Playwright calls `connect_over_cdp()` to attach to the existing Chrome.  If the connection fails (sandbox not running), it falls back to launching a standalone browser — so local development works without Docker.
+When `BROWSER_CDP_URL` is set, Playwright calls `connect_over_cdp()` to attach to the existing Chrome.  If the connection fails (sandbox not running), it falls back to launching a standalone browser — so local development works without Docker. With Prax's `BROWSER_SANDBOX_ONLY=true` (default `false`) that fallback is disabled: the harness raises instead of launching a Chromium on its own host, and the VNC manual-login flow below returns a "use the sandbox desktop" instruction instead of starting a host Xvfb.
 
 ### Login Strategies
 

@@ -2,86 +2,219 @@
 
 [← prax-sandbox docs](README.md)
 
-> ⚠️ **2026-07 change — the AI coding-agent CLIs were removed.** The image no
-> longer ships `opencode`, `@anthropic-ai/claude-code`, or `@openai/codex`, no
-> longer runs the OpenCode server (`:4096`), and no longer takes model API keys
-> in its environment. The sandbox is now a **pure execution environment** (shell,
-> Python + scientific stack, DuckDB, Lean, browser, desktop); the harness codes
-> directly with its own tools. A user who wants a coding-agent CLI installs it
-> themselves and manages its own (dedicated, spend-capped) key. **The
-> OpenCode-driven sections below (`opencode serve`, `delegate_sandbox` sessions,
-> the coding-session lifecycle) are historical / opt-in-only and pending a
-> rewrite.** Rationale: prax `docs/security/sandbox-execution-boundary.md`.
-
 > Part of **prax-sandbox**. This documents the sandbox's internals (the container,
-> the image). The agent-facing tools that *drive* it (`run_python`, `sandbox_*`,
-> `data_query`) live in the harness that consumes the sandbox — for the reference
-> integration see the Prax repo (`docs/infrastructure/sandbox.md`).
+> the image, the exec control plane). The agent-facing tools that *drive* it
+> (`run_python`, `sandbox_*`, `data_query`, `lean_check`) live in the harness that
+> consumes the sandbox — for the reference integration see the Prax repo
+> (`docs/infrastructure/sandbox.md`).
+
+> **Regenerated 2026-09-06** from `sandbox/Dockerfile`, `sandbox/supervisord.conf`,
+> `sandbox/entrypoint.sh`, `docker-compose.yml` and `docker-compose.remote.yml`.
+> Until 2026-07 the sandbox also ran AI coding-agent CLIs (OpenCode / Claude Code /
+> Codex) and an OpenCode session server on `:4096`; those were removed in #4 / #5
+> — the sandbox is now a **pure execution environment** with **no model API key**
+> in the image or in this repo's compose files (rationale: prax
+> `docs/security/sandbox-execution-boundary.md`). **Known gap (2026-09):** the Prax
+> harness's own `docker-compose.yml` and `docker-compose.lite.yml` still forward
+> `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` into their `sandbox` service; that doc
+> tracks it.
+> The design narrative that assumed them is kept only under *History* at the end.
 
 ### The Problem
 
 Instead of adding infinite specialized tools (one for LaTeX, one for ffmpeg, one for data transforms...), give the agent a sandbox where it can write and execute its own code. The hardest or most common operations stay as dedicated tools; everything else the agent codes up itself.
 
-### The Solution: Docker + OpenCode
+### What the sandbox is
 
-[OpenCode](https://opencode.ai/) is an open-source coding agent (MIT, 126k+ stars) with a headless HTTP server mode (`opencode serve`). It has 15 built-in tools (bash, file edit, read, write, grep, glob, etc.), supports every major LLM provider, and has first-class session management (create, resume, fork, export).
+One **always-on** container. `SandboxConfig.persistent` is `True` and is the only
+mode (`prax_sandbox_client/config.py`); the per-session ephemeral containers of
+the original design were dropped. The harness reaches it with `docker exec`
+through `prax_sandbox.control_plane`:
 
-**Always-on sandbox:** In Docker Compose deployment, the sandbox runs 24/7 alongside the app. Prax can install system packages on the fly with `sandbox_install("poppler-utils")` — no user intervention needed. For permanent additions, Prax can edit the sandbox Dockerfile and rebuild with `sandbox_rebuild()`. In local development, ephemeral containers are spun up per session instead.
+| Call | What it does |
+|---|---|
+| `run_shell(command, timeout=60)` | `sh -c <command>` in the container; returns `{"stdout", "stderr", "exit_code"}` (stdout capped at 10 000 chars, stderr at 5 000). |
+| `run_command(cmd, cwd=None, env=None, timeout=300)` | argv exec (paths already translated by the harness); returns a `subprocess.CompletedProcess`. |
+| `install_package(name)` | `apt-get install -y --no-install-recommends <name>` in the container (name regex-validated) and appends it to `/root/.installed_packages`. |
+| `rebuild_sandbox(dockerfile_content=None)` | optionally overwrites `sandbox/Dockerfile`, runs `docker build -t prax-sandbox:latest sandbox/`, restarts the container (`container.restart`), and waits up to 60 s for `docker exec true` to succeed. |
+| `health()` | `True` once `docker exec … true` succeeds (there is no HTTP health endpoint in the container any more). |
 
-**Interactive feedback loop:** The main agent and coding agent converse. If the result isn't satisfactory, the main agent can send follow-up instructions, switch models mid-session (e.g., from Claude to GPT-5), or abort and try a different approach.
+The container is located by docker label (`com.docker.compose.service=sandbox` by
+default — `SandboxConfig.container_label`), not by hostname. The `timeout`
+arguments are accepted for signature parity but are **not enforced** by the
+`docker exec` layer (`prax_sandbox/exec.py`).
 
-**Solution reuse:** Every `sandbox_finish()` commits code to the workspace git with a `SOLUTION.md`. When a similar task comes up, the agent searches the archive and re-executes the existing solution — zero tokens burned re-solving a solved problem.
+### Sandbox Docker Image (`sandbox/Dockerfile`)
 
-**Budget control:** Each session has a configurable round limit (`SANDBOX_MAX_ROUNDS`, default 10). The agent sees `rounds_remaining` in every response so it knows when to wrap up. After hitting the limit, only `sandbox_finish` or `sandbox_abort` are available. Timed-out messages do *not* consume a round — only successful responses count against the budget.
+Base image `debian:trixie-slim`. Installed at build time:
 
-**Stuck-session protection:** If the coding agent inside the sandbox stops responding (e.g. infinite loop, package install hang, OOM), `send_message` tracks consecutive failures. After 3 consecutive timeouts the session is **auto-aborted** and the agent is told to start fresh. The `sandbox_message` tool also returns explicit guidance to abort on individual timeouts, preventing the main agent from looping endlessly on a stuck session.
+- **Languages / runtimes:** `python3` + `pip` + `venv`, `nodejs` + `npm`, `uv` (copied to `/usr/local/bin`).
+- **Scratch Python venv** at `/opt/prax-venv` with `faster-whisper`, `duckdb`, `pandas`, `sympy` — the entrypoint prepends it to `PATH` for supervisord's children (a `docker exec` shell does not inherit that), so harness tools address `/opt/prax-venv/bin/python` explicitly.
+- **Lean 4** via elan at `/opt/elan` (`ELAN_HOME` baked; toolchain `leanprover/lean4:v4.31.0`; `lean` / `lake` symlinked into `/usr/local/bin`). mathlib is not fetched.
+- **Documents / media:** TeX Live (`texlive-latex-base` / `-extra` / `-recommended`, `-fonts-recommended` / `-extra`, `-science`, `-bibtex-extra`, `-publishers`, `lmodern`, `cm-super`, `latexmk`, `biber`), `ffmpeg`, `poppler-utils`, `pandoc`, `hugo`, `imagemagick`, and `@mermaid-js/mermaid-cli` (npm; puppeteer is pointed at the image's Chromium via `PUPPETEER_SKIP_DOWNLOAD` / `PUPPETEER_EXECUTABLE_PATH`, and `/etc/puppeteer-config.json` supplies `--no-sandbox`).
+- **Desktop / browser stack:** `xvfb`, `x11vnc`, `xfce4`, `xterm`, `dbus-x11`, `novnc`, `websockify`, `xdotool`, `scrot`, `xsel`, `python3-websockets`, `socat`, `supervisor`, and Debian's `chromium` package (symlinked as `/usr/bin/chromium-browser`; `/etc/chromium.d/extensions` is rewritten so the empty `--load-extension=` Debian injects cannot block the cast extension).
+- **code-server** (web VS Code) via `curl -fsSL https://code-server.dev/install.sh | sh`. It is *installed only*: no supervisord program starts it, and neither compose file publishes its port. `8443` is `EXPOSE`d for it.
+- **Misc:** `git`, `curl`, `wget`, `jq`, `tmux`, `psmisc`, `ca-certificates`.
 
-**File sharing:** When the sandbox produces large files (videos, PDFs), Prax can publish them with `workspace_share_file()` to generate a public ngrok URL — but only on explicit user request, and typically only for SMS or Discord recipients (TeamWork users should be pointed at the file in their workspace browser instead). Each share is registered in `workspaces/{user}/.shares.json` with a randomized token and survives restarts. Use `workspace_list_shares()` to enumerate active shares and `workspace_unshare_file(token)` to revoke.
+Baked environment: `SHELL=/bin/bash`, `DISPLAY=:99`, `ELAN_HOME=/opt/elan`,
+`WORKDIR /workspace`. `EXPOSE 6080 6090 8443`. Image `HEALTHCHECK` =
+`pgrep -x supervisord`. `CMD` = `/usr/local/bin/entrypoint.sh`.
 
-**GPU access (NVIDIA, optional):** The sandbox is CPU-only by default. To attach the host's NVIDIA GPU(s), use the `docker-compose.gpu.yml` override:
+**Rule baked into the Dockerfile:** never install user-facing tooling under
+`/root`. The Prax harness's compose bind-mounts a per-user directory over `/root`
+at runtime, which hides anything baked there (that is why `uv`, the venv and elan
+live in `/usr/local/bin` and `/opt`). The entrypoint logs any dangling `PATH`
+symlink it finds at boot.
+
+### Process tree (`sandbox/supervisord.conf`)
+
+`entrypoint.sh` prepares on-disk state and then `exec`s supervisord as PID 1
+(`user=root`). Every program has `autostart=true`, `autorestart=true`,
+`startretries=10` and logs to the container's stdout/stderr:
+
+| Priority | Program | Command / role |
+|---|---|---|
+| 10 | `xvfb` | `Xvfb :99 -screen 0 1920x1080x24` |
+| 15 | `dbus` | session bus at `unix:path=/run/dbus-session.sock` |
+| 20 | `x11vnc` | `-display :99 -forever -shared -nopw -rfbport 5900` (no VNC password) |
+| 25 / 30 / 35 | `xfwm4` / `xfce4-panel` / `xfdesktop` | the XFCE session |
+| 40 | `websockify` | `--web=/usr/share/novnc 6080 localhost:5900` (noVNC) |
+| 45 | `clipboard-bridge` | `clipboard-bridge.py` — WebSocket server on `6090` syncing the X11 clipboard via `xsel` |
+| 50 | `chromium` | `chromium-launch.sh` — non-headless, `--no-sandbox`, `--remote-debugging-port=9222`, profile `/root/.browser_profiles/default`, cast extension from `/opt/prax-cast-ext` |
+| 55 | `cdp-proxy` | `socat TCP-LISTEN:9223,fork,reuseaddr,bind=0.0.0.0 TCP:127.0.0.1:9222` |
+
+There is no `[program:opencode]` and no `[program:code-server]`.
+
+### Entrypoint (`sandbox/entrypoint.sh`)
+
+One-shot, in order: create the browser profile dir and clear its Chromium
+singleton locks; remove stale `:99` X locks; **print** any package manifests found
+under `/root` (see below); create `/opt/prax-venv` if missing and prepend it to
+`PATH`; seed XFCE config, `.Xresources` and default-application entries under
+`/root` on first run only; rewrite the cast extension's signaling host
+(`PRAX_CAST_SIGNALING_HOST`, default `prax:8000`) and wipe its cached service
+worker; pin the extension in Chromium's `Preferences`; scan the `PATH` dirs for
+dangling symlinks and warn; `exec supervisord`.
+
+### Ports and exposure
+
+| Port | In the container | `docker-compose.yml` (local) | `docker-compose.remote.yml` |
+|---|---|---|---|
+| 9222 | Chromium CDP, loopback inside the container (Chromium's default binding; `--remote-allow-origins=http://127.0.0.1:9222`) | not published | not published |
+| 9223 | socat forward of 9222, bound `0.0.0.0` | `127.0.0.1:9223` | not published (reach it through the daemon's `/v1/cdp/*`) |
+| 5900 | x11vnc, **no password** | not published | not published |
+| 6080 | websockify / noVNC | `127.0.0.1:6080` | not published |
+| 6090 | clipboard bridge WebSocket | `127.0.0.1:6090` | not published |
+| 8443 | `EXPOSE`d for code-server; nothing listens unless you start it | not published | not published |
+
+**None of these endpoints authenticate.** CDP is arbitrary code execution plus
+local file read; noVNC is the whole desktop. The only protections are the
+loopback-only publish in the local compose and non-publication (plus the
+bearer-authenticated daemon) in the remote compose. Never publish them on a
+network.
+
+### Mounts and persistence
+
+This repo's `docker-compose.yml` mounts exactly one volume:
+
+```yaml
+volumes:
+  - ${WORKSPACE_DIR:-./workspace}:/workspace
+```
+
+Nothing else is bind-mounted — in particular **`/root` is not** — so the browser
+profile (`/root/.browser_profiles/default`), the XFCE config, shell history and
+the package manifests live in the container's writable layer: they survive
+`docker compose restart` but are lost when the container is recreated
+(`docker compose up --force-recreate`, `docker compose down`).
+
+The Prax harness's own compose (`prax/docker-compose.yml`, `sandbox` service) adds
+the user-scoped mounts the Dockerfile comment refers to:
+
+```yaml
+- ${WORKSPACE_DIR:-../workspaces}/${PRAX_USER_ID}:/workspace
+- .:/source                                                            # the harness repo, rw
+- ${WORKSPACE_DIR:-../workspaces}/${PRAX_USER_ID}/.sandbox/home:/root  # persistent home
+- ${WORKSPACE_DIR:-../workspaces}/${PRAX_USER_ID}/.sandbox/claude:/root/.claude
+- ${WORKSPACE_DIR:-../workspaces}/${PRAX_USER_ID}/.sandbox/codex:/root/.codex
+- ${WORKSPACE_DIR:-../workspaces}/${PRAX_USER_ID}/.sandbox/opencode:/root/.config/opencode
+```
+
+With that compose, `/workspace` is one user's workspace root (`PRAX_USER_ID`
+selects whose) and `.sandbox/home` inside it is the persistent `/root`. The last
+three sub-mounts were for the coding-agent CLIs and are leftovers — the CLIs are
+no longer in the image. That same `sandbox` service also sets
+`ANTHROPIC_API_KEY=${ANTHROPIC_KEY}` and `OPENAI_API_KEY=${OPENAI_KEY}` in its
+`environment:` block — the Known gap noted at the top of this page.
+
+### Package manifests
+
+`install_package` appends to `/root/.installed_packages`; `run_shell` additionally
+detects `apt(-get) install`, `pip(3) install` and `npm install -g` commands that
+exit 0 and appends their package names to `/root/.installed_packages`,
+`/root/.installed_pip_packages` and `/root/.installed_npm_packages` (best effort,
+`control_plane._track_installed_packages`).
+
+These manifests are **not auto-reinstalled** on rebuild — deliberately (a bad
+package could break the desktop in a loop). On boot the entrypoint only prints
+them ("Package manifests found in /root/ — review and add to Dockerfile for
+persistence"). To make a package permanent, add it to `sandbox/Dockerfile`
+(`rebuild_sandbox(dockerfile_content=…)` does that from the harness side).
+
+### Terminal sessions
+
+`SHELL=/bin/bash`; there is **no tmux wrapper** (the Dockerfile comment about
+"tmux-shell" directly above `ENV SHELL=/bin/bash` is stale). Terminal persistence
+across WebSocket reconnects is owned by the consuming UI (TeamWork's terminal
+router), helped by `sandbox/bash-respawn.sh`, which re-spawns `bash -l` in the
+same PTY when the user types `exit`. `tmux` is installed for anyone who wants to
+run it by hand.
+
+### GPU access (NVIDIA, optional)
+
+The sandbox is CPU-only by default. The Prax harness ships a compose override
+(`prax/docker-compose.gpu.yml`) and a `make sandbox-gpu` target (preflight check +
+`nvidia-smi` smoke test) — both run from the Prax checkout:
 
 ```bash
-make sandbox-gpu                                                # one-shot, with preflight check + nvidia-smi smoke test
-echo 'COMPOSE_FILE=docker-compose.yml:docker-compose.gpu.yml' >> .env  # persist for all future compose commands
+make sandbox-gpu                                                       # one-shot
+echo 'COMPOSE_FILE=docker-compose.yml:docker-compose.gpu.yml' >> .env  # persist for future compose commands
 ```
 
-Requires `nvidia-container-toolkit` on the host (verify with `docker info | grep -i nvidia`). The override reserves all GPUs for the sandbox and sets `NVIDIA_VISIBLE_DEVICES=all` + `NVIDIA_DRIVER_CAPABILITIES=compute,utility` so the toolkit injects the matching CUDA libraries at runtime — no CUDA install in the image. Inside the sandbox, `nvidia-smi` works immediately and `pip install torch --index-url https://download.pytorch.org/whl/cu124` (any cu12x wheel matches a 13.x driver) auto-detects the GPU. Pin to specific cards by changing `count: all` to `device_ids: ["0", "2"]` in the override file.
+Requires `nvidia-container-toolkit` on the host (verify with `docker info | grep -i nvidia`).
+The override reserves all GPUs for the sandbox and sets `NVIDIA_VISIBLE_DEVICES=all`
++ `NVIDIA_DRIVER_CAPABILITIES=compute,utility` so the toolkit injects the matching
+CUDA libraries at runtime — no CUDA install in the image. Pin to specific cards by
+changing `count: all` to `device_ids: ["0", "2"]` in the override. This repo's own
+compose has no GPU override yet (see the top-level README roadmap).
 
-> **Security note:** Ngrok URLs are publicly reachable — anyone with the link can download the file. Shared file URLs are protected by two layers of randomization: a 32-character hex token in the path and a UUID-randomized filename (only the file extension is preserved). This makes URLs unguessable and reveals nothing about the original file name or contents. Still, treat shared links as semi-public: share them only with intended recipients, and revoke them with `workspace_unshare_file()` when no longer needed.
+### Container security posture
 
-### Sandbox Docker Image
+**Known gap (2026-09):** the container is not hardened beyond network
+non-exposure.
 
-Pre-built with common tools:
+- Everything runs as **root**: no `USER` in the Dockerfile, `supervisord.conf`
+  sets `user=root`, and `docker exec` from the control plane runs as that user.
+- Chromium runs with `--no-sandbox` (`sandbox/chromium-launch.sh`), as does
+  mermaid's puppeteer (`/etc/puppeteer-config.json`).
+- Neither `docker-compose.yml` nor `docker-compose.remote.yml` sets `mem_limit`,
+  `pids_limit`, `cap_drop`, `security_opt`, `read_only` or a sized `tmpfs` for
+  `/tmp` — a runaway process can fill the host disk (the container overlay *is*
+  the host disk).
+- `x11vnc` runs `-nopw`; noVNC, the clipboard bridge and the CDP forwarder have
+  no auth of their own.
+- One container is shared by every user of the harness (no per-tenant isolation).
+- What *does* hold: the docker socket is **not** mounted into the sandbox
+  container by either compose file; the local compose publishes only on
+  `127.0.0.1`; the remote compose publishes nothing from the sandbox and fronts
+  it with the bearer-authenticated daemon; the image carries no model API key.
 
-```dockerfile
-FROM node:22-slim
-RUN apt-get update && apt-get install -y \
-    python3 python3-pip python3-venv \
-    texlive-latex-base texlive-latex-extra texlive-fonts-recommended latexmk \
-    ffmpeg poppler-utils pandoc \
-    git curl wget jq \
-    && npm install -g opencode
-WORKDIR /workspace
-EXPOSE 4096
-CMD ["opencode", "serve", "--hostname", "0.0.0.0", "--port", "4096"]
-```
+### Harness-side tools (Prax reference integration)
 
-(The real image — `sandbox/Dockerfile` — also carries a persistent Python venv at
-`/opt/prax-venv` with `faster-whisper` (audio) and `duckdb` + `pandas` (the
-harness's opt-in `data_query` SQL tool), plus the Lean 4 toolchain at `/opt/elan`
-for `lean_check`. All three live under `/opt/` so the `/root` and `/workspace`
-volume mounts can't hide them, and each is addressed by absolute path from the
-consuming harness.)
+The tools below live in the Prax repo, not here; they are listed because they are
+the usual way the sandbox above gets driven.
 
-### VS Code
-
-VS Code is installed in the sandbox via the Microsoft apt repository. It runs on the VNC desktop (Xvfb + Fluxbox) alongside Chromium and any other GUI apps. Prax can launch it with `desktop_open("code /workspace")` and interact with it programmatically via the desktop tools (screenshot, click, type). Users can also open VS Code directly from the noVNC iframe in TeamWork's Desktop tab.
-
-This makes four coding environments available in the sandbox: **VS Code**, **Claude Code**, **Codex**, and **OpenCode**.
-
-### Desktop Interaction Tools
-
-Prax has 6 tools for computer-use — programmatic control of the sandbox's graphical desktop via `xdotool` and `scrot`:
+**Desktop interaction** — Prax has 6 tools for computer-use, programmatic control of the sandbox's graphical desktop via `xdotool` and `scrot`:
 
 | Tool | What It Does |
 |------|-------------|
@@ -92,43 +225,18 @@ Prax has 6 tools for computer-use — programmatic control of the sandbox's grap
 | `desktop_list_windows` | List all open windows with their titles and positions. |
 | `desktop_open` | Launch a GUI application in the background on DISPLAY :99. |
 
-These tools let Prax interact with any GUI application — VS Code, Chromium, file managers, or anything installed via `sandbox_install`. The typical pattern is a **screenshot-analyze-act loop**: take a screenshot, analyze what's on screen, click or type to interact, then screenshot again to verify the result.
+These tools let Prax interact with any GUI application — Chromium, xterm, or anything installed via `sandbox_install`. The typical pattern is a **screenshot-analyze-act loop**: take a screenshot, analyze what's on screen, click or type to interact, then screenshot again to verify the result. See [Desktop](desktop.md) for the VNC desktop architecture and computer-use patterns.
 
-See [Desktop](desktop.md) for a deep dive on the VNC desktop architecture and computer-use patterns.
+**File sharing:** When the sandbox produces large files (videos, PDFs), Prax can publish them with `workspace_share_file()` to generate a public ngrok URL — but only on explicit user request, and typically only for SMS or Discord recipients (TeamWork users should be pointed at the file in their workspace browser instead). Each share is registered in `workspaces/{user}/.shares.json` with a randomized token and survives restarts. Use `workspace_list_shares()` to enumerate active shares and `workspace_unshare_file(token)` to revoke.
 
-### Package Tracking
+> **Security note:** Ngrok URLs are publicly reachable — anyone with the link can download the file. Shared file URLs are protected by two layers of randomization: a 32-character hex token in the path and a UUID-randomized filename (only the file extension is preserved). This makes URLs unguessable and reveals nothing about the original file name or contents. Still, treat shared links as semi-public: share them only with intended recipients, and revoke them with `workspace_unshare_file()` when no longer needed.
 
-When Prax installs packages via `sandbox_install()`, each package name is logged to `/root/.installed_packages`. This manifest is a simple newline-delimited list of apt package names.
+### History
 
-On container rebuild, the entrypoint script reads this manifest and reinstalls any packages that aren't already present in the base image. This means user-installed packages survive `docker compose up --build` — no manual intervention needed. The manifest itself persists because `/root` is volume-mounted to the user's `.sandbox/home/` directory.
-
-### User-Scoped Mounts
-
-The sandbox mounts only the current user's workspace folder, not the entire workspaces directory:
-
-```yaml
-# docker-compose.yml (sandbox service)
-volumes:
-  - ${WORKSPACE_DIR}/${PRAX_USER_ID}:/workspace     # user's workspace files
-  - ${WORKSPACE_DIR}/${PRAX_USER_ID}/.sandbox/home:/root  # persistent home dir
-```
-
-Key points:
-
-- **`/workspace`** (singular) is the user's workspace root inside the sandbox. This is different from the app container's `/app/workspaces` which holds all users.
-- **`PRAX_USER_ID`** in `.env` controls which user's workspace is mounted. Must be set before `docker compose up`.
-- **`.sandbox/`** lives inside the user's workspace directory at `{workspace}/{user_id}/.sandbox/`. It holds persistent home directory contents — browser profiles, shell history, installed package manifests, coding agent configs, and desktop customizations.
-- Sub-mounts pin specific config directories: `.sandbox/claude` for Claude Code, `.sandbox/codex` for Codex, `.sandbox/opencode` for OpenCode.
-
-### tmux Persistence
-
-The sandbox sets `$SHELL` to `tmux-shell.sh`, a wrapper that attaches to (or creates) a persistent tmux session named `prax`. This means:
-
-- **Terminal state survives WebSocket reconnects.** Refreshing TeamWork's terminal tab, switching devices, or losing connection doesn't lose your shell history or running processes.
-- **The entrypoint creates the session** on container start (`tmux new-session -d -s prax`). The tmux-shell wrapper attaches to it on each new terminal connection.
-- **All terminal connections share the same session.** Multiple TeamWork tabs see the same terminal. This is intentional — the sandbox is single-user.
-
-### Alternatives Evaluated
+**Original design (2026-06): Docker + OpenCode.** The sandbox was first built
+around [OpenCode](https://opencode.ai/), an open-source coding agent with a
+headless HTTP server mode (`opencode serve`), and the alternatives were weighed as
+follows:
 
 | Option | Verdict |
 |--------|---------|
@@ -136,4 +244,14 @@ The sandbox sets `$SHELL` to `tmux-shell.sh`, a wrapper that attaches to (or cre
 | **E2B** | Cloud-only, pay-per-second, no self-hosting. Good API but sends user data to third party. |
 | **Daytona** | Self-hostable, 90ms sandbox creation, built-in Git/LSP/MCP. Strong runner-up — upgrade path if Docker management gets unwieldy. |
 | **Docker SDK + custom sub-agent** | Full control but requires building everything OpenCode already has. |
-| **Docker SDK + OpenCode** | **Selected.** Best balance of capability, simplicity, and self-hosting. |
+| **Docker SDK + OpenCode** | **Selected at the time.** Best balance of capability, simplicity, and self-hosting. |
+
+**Removed 2026-07 (#4, #5):** the OpenCode server and the coding-session
+lifecycle (interactive feedback loop, mid-session model switching, round budgets
+via `SANDBOX_MAX_ROUNDS`, auto-abort after 3 consecutive timeouts), solution
+archiving to the workspace git with a `SOLUTION.md` and re-execution from the
+archive, the `sandbox/opencode.json` seed, the Claude Code / Codex / OpenCode
+CLIs, and model API keys in the container env. The harness now codes with its own
+tools and the sandbox only executes. The `SandboxSession` / `RemoteSession` types
+are still exported by `prax_sandbox_client` for compatibility, but nothing
+produces them.
