@@ -1,9 +1,7 @@
 """Daemon configuration — separate from the client's SandboxConfig.
 
 Built from environment variables (``PRAX_SANDBOX_DAEMON_*``) at startup. Holds
-the server-side secrets the client never sees: the bearer token clients present,
-and a SEPARATE internal OpenCode password (so OpenCode auth is pure
-defense-in-depth and port 4096 is never the client-facing surface).
+the server-side secret the client never sees: the bearer token clients present.
 """
 from __future__ import annotations
 
@@ -32,16 +30,13 @@ class DaemonConfig:
     bearer_token: str | None = None         # MANDATORY; daemon refuses to start without it
 
     # --- sandbox wiring ---
-    opencode_host: str = "localhost"        # where the daemon reaches OpenCode :4096
-    opencode_password: str | None = None    # internal, != bearer_token; never client-facing
     cdp_host: str = "127.0.0.1"             # where the daemon reaches Chrome's CDP
     cdp_port: int = 9222                     # 9222 if co-located; "sandbox":9223 if containerized
     container_label: str = "com.docker.compose.service=sandbox"
     workspace_dir: str = "/workspace"
     image: str = "prax-sandbox:latest"
-    default_model: str = "openai/gpt-5.4"
-    anthropic_key: str | None = None
-    openai_key: str | None = None
+    # No model keys / model name here: the daemon forwards no provider
+    # credentials (the control plane reads none; the sandbox is keyless).
 
     # --- limits / policy ---
     max_concurrent_exec: int = 8
@@ -66,16 +61,11 @@ class DaemonConfig:
             tls_key=e.get("PRAX_SANDBOX_DAEMON_TLS_KEY") or None,
             mtls_ca=e.get("PRAX_SANDBOX_DAEMON_MTLS_CA") or None,
             bearer_token=token or None,
-            opencode_host=e.get("PRAX_SANDBOX_OPENCODE_HOST", "localhost"),
-            opencode_password=e.get("PRAX_SANDBOX_OPENCODE_PASSWORD") or None,
             cdp_host=e.get("PRAX_SANDBOX_CDP_HOST", "127.0.0.1"),
             cdp_port=int(e.get("PRAX_SANDBOX_CDP_PORT", "9222")),
             container_label=e.get("PRAX_SANDBOX_CONTAINER_LABEL", "com.docker.compose.service=sandbox"),
             workspace_dir=e.get("PRAX_SANDBOX_WORKSPACE_DIR", "/workspace"),
             image=e.get("SANDBOX_IMAGE", "prax-sandbox:latest"),
-            default_model=e.get("SANDBOX_DEFAULT_MODEL", "openai/gpt-5.4"),
-            anthropic_key=e.get("ANTHROPIC_API_KEY") or None,
-            openai_key=e.get("OPENAI_API_KEY") or None,
             max_concurrent_exec=int(e.get("PRAX_SANDBOX_MAX_CONCURRENT_EXEC", "8")),
             max_payload_bytes=int(e.get("PRAX_SANDBOX_MAX_PAYLOAD_BYTES", str(100 * 1024 * 1024))),
             request_timeout=int(e.get("PRAX_SANDBOX_REQUEST_TIMEOUT", "600")),
@@ -85,15 +75,12 @@ class DaemonConfig:
     def to_sandbox_config(self) -> SandboxConfig:
         """Build the control-plane config the daemon drives in-process."""
         return SandboxConfig(
-            host=self.opencode_host,
             image=self.image,
             persistent=True,
             workspace_dir=self.workspace_dir,
             container_label=self.container_label,
-            default_model=self.default_model,
-            anthropic_key=self.anthropic_key,
-            openai_key=self.openai_key,
-            opencode_password=self.opencode_password,
+            # anthropic_key/openai_key/default_model are NOT forwarded — the
+            # daemon reads none; SandboxConfig's own (None) defaults apply.
             # on_output/resolve_workspace/commit stay None -> control plane's
             # built-in inert defaults (the harness owns those callbacks).
         )

@@ -152,3 +152,29 @@ class TestFailClosed:
 
     def test_non_loopback_with_tls_ok(self):
         DaemonConfig(bearer_token="t", bind_host="0.0.0.0", tls_cert="c", tls_key="k").validate_or_die()
+
+
+class TestNoModelKeyPlumbing:
+    """The daemon forwards no provider credentials. It used to read
+    ANTHROPIC_API_KEY / OPENAI_API_KEY / SANDBOX_DEFAULT_MODEL from its OWN env
+    into SandboxConfig fields the control plane never reads — dead credential
+    plumbing in a root-equivalent component, inviting the belief that keys
+    reach the container."""
+
+    ENV = {
+        "PRAX_SANDBOX_DAEMON_TOKEN": TOKEN,
+        "ANTHROPIC_API_KEY": "sk-ant-must-not-be-read",
+        "OPENAI_API_KEY": "sk-must-not-be-read",
+        "SANDBOX_DEFAULT_MODEL": "vendor/must-not-be-read",
+    }
+
+    def test_daemon_config_carries_no_model_fields(self):
+        cfg = DaemonConfig.from_env(self.ENV)
+        for attr in ("anthropic_key", "openai_key", "default_model"):
+            assert not hasattr(cfg, attr), f"DaemonConfig must not carry {attr}"
+
+    def test_keys_in_daemon_env_do_not_reach_the_control_plane(self):
+        sc = DaemonConfig.from_env(self.ENV).to_sandbox_config()
+        assert sc.anthropic_key is None
+        assert sc.openai_key is None
+        assert sc.default_model != "vendor/must-not-be-read"

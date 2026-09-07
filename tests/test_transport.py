@@ -9,10 +9,8 @@ import pytest
 import requests
 
 from prax_sandbox_client import (
-    RemoteSession,
     SandboxClient,
     SandboxConfig,
-    SandboxSession,
     SandboxTransportError,
     make_transport,
 )

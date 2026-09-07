@@ -76,3 +76,13 @@ class TestRemoteComposeExposure:
         for bad in ('"4096:4096"', '"9223:9223"', '"6080:6080"', '"6090:6090"',
                     '"127.0.0.1:4096:4096"', '"127.0.0.1:9223:9223"'):
             assert bad not in text, f"remote compose must not publish {bad}"
+
+    def test_no_opencode_residue(self):
+        """OpenCode (the :4096 coding-agent server) is gone from the image. Any
+        reference left in the remote compose is dead at best — the old
+        healthcheck curled :4096 and could never pass, so the daemon's
+        service_healthy dependency blocked forever — and a required
+        OPENCODE_SERVER_PASSWORD made the stack refuse to start at all."""
+        text = (pathlib.Path(__file__).parent.parent / "docker-compose.remote.yml").read_text()
+        assert "4096" not in text
+        assert "opencode" not in text.lower()
