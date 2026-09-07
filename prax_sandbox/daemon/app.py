@@ -68,11 +68,7 @@ def build_app(cfg) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         # Configure the control plane with the daemon's config BEFORE serving.
-        # The container boots OpenCode with the same internal password (persisted
-        # env), so the client+server never have a mismatched-auth window.
         control_plane.configure(cfg.to_sandbox_config())
-        if cfg.opencode_password:
-            await run_in_threadpool(_warn_if_opencode_unauthenticated, cfg)
         yield
 
     app = FastAPI(title="prax-sandbox daemon", version="1", lifespan=lifespan)
@@ -221,17 +217,3 @@ def build_app(cfg) -> FastAPI:
     app.include_router(build_cdp_router(cfg, require_auth))
 
     return app
-
-
-def _warn_if_opencode_unauthenticated(cfg) -> None:
-    """Best-effort: if OpenCode answers WITHOUT the password, log loudly."""
-    try:
-        import requests
-        r = requests.get(f"http://{cfg.opencode_host}:4096/global/health", timeout=2)
-        if r.status_code == 200:
-            logger.warning(
-                "OpenCode answered /global/health WITHOUT auth — it may be running "
-                "password-less. Ensure OPENCODE_SERVER_PASSWORD is set in the container."
-            )
-    except Exception:
-        pass  # container may still be starting; not fatal

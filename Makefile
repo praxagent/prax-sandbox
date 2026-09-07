@@ -9,6 +9,6 @@ test:
 ci: lint test
 	@echo "\nAll prax-sandbox checks passed."
 
-# Build the sandbox image (OpenCode + Chrome/CDP + desktop).
+# Build the sandbox image (Python/scientific stack + Chrome/CDP + desktop).
 build:
 	docker build -t prax-sandbox:latest sandbox/

@@ -41,7 +41,8 @@ box. Therefore:
   internal network. CDP is reachable **only** through the daemon's authenticated
   proxy (`/v1/cdp/*`); the desktop is not proxied at all. (Until 2026-07 this list
   also included an OpenCode server on `4096`, fronted by a separate internal
-  password; that server no longer exists — see the Known gap below.)
+  password; that server no longer exists, and the daemon's `PRAX_SANDBOX_OPENCODE_*`
+  settings for it were dropped on 2026-09-07.)
 - **`/healthz` is unauthenticated** (an empty `200`, nothing else) and is reachable
   wherever `8843` is published; every `/v1` route requires the bearer.
 - **`tls_verify=False` is accepted but dangerous.** It disables certificate *and*
@@ -57,18 +58,15 @@ box. Therefore:
 
 ## Quick start (docker compose)
 
-> **Known gap (2026-09): `docker-compose.remote.yml` cannot come up as committed.**
-> Its `sandbox` healthcheck still curls the removed OpenCode server
-> (`http://localhost:4096/global/health`, line 29 — nothing listens on `4096` since
-> 2026-07), the `daemon` service waits on `condition: service_healthy` (lines
-> 60-62), and line 48 still requires `OPENCODE_SERVER_PASSWORD` for the removed
-> subsystem (`${OPENCODE_SERVER_PASSWORD:?set a strong secret}` aborts if unset).
-> The image's own `HEALTHCHECK` (`pgrep -x supervisord`) and the local
-> `docker-compose.yml` are correct; the remote compose overrides the good check
-> with the dead one. Until it is fixed, run `prax-sandbox-daemon` directly (with
-> the env vars from the reference table below, `PRAX_SANDBOX_CDP_PORT=9223` for the
-> loopback-published CDP port) beside a sandbox started from `docker-compose.yml`
-> — not exercised live here. The steps below are what the compose file *intends*.
+> **Note (2026-09-07).** Until this date the remote compose could not come up: its
+> `sandbox` healthcheck curled the removed OpenCode server on `:4096` (so the
+> `daemon` service's `condition: service_healthy` never cleared) and it demanded an
+> `OPENCODE_SERVER_PASSWORD` that nothing consumed. Both are fixed: the healthcheck
+> is `pgrep -x supervisord` (the same liveness check as the image's `HEALTHCHECK`
+> and the local `docker-compose.yml`) and the only required secret is the daemon
+> token. The repaired stack has not yet been brought up live end-to-end (a live
+> integration test is on the README's *Planned* list); the steps below are what
+> the compose file does.
 
 ```bash
 cd prax-sandbox
@@ -85,7 +83,6 @@ openssl req -x509 -newkey rsa:2048 -nodes -days 825 \
 # 3. Secrets in .env
 cat >> .env <<'EOF'
 PRAX_SANDBOX_DAEMON_TOKEN=<a long random token>     # clients present this
-OPENCODE_SERVER_PASSWORD=<any value>                 # still demanded by the compose file's `:?` check; unused since 2026-07
 EOF
 
 # 4. Up — only the daemon's TLS port (8843) is published
@@ -137,8 +134,7 @@ none, with `SANDBOX_ENABLED=false`).
 | `PRAX_SANDBOX_DAEMON_TLS_CERT` / `…_TLS_KEY` | — | Direct HTTPS (else use a proxy / tailscale serve on loopback) |
 | `PRAX_SANDBOX_DAEMON_MTLS_CA` | — | Require client certs (opt-in) |
 | `PRAX_SANDBOX_CDP_HOST` / `…_CDP_PORT` | `127.0.0.1` / `9222` | Where the daemon reaches Chrome's CDP (`sandbox` / `9223` when containerized: the socat forwarder inside the sandbox) |
-| `PRAX_SANDBOX_OPENCODE_HOST` / `PRAX_SANDBOX_OPENCODE_PASSWORD` (compose: `OPENCODE_SERVER_PASSWORD`) | `localhost` / — | **Legacy, no effect.** Still read by `daemon/config.py` and still *required* by `docker-compose.remote.yml` line 48, but the OpenCode server they configured was removed in 2026-07; when the password is set the daemon only issues a best-effort `GET` against `:4096` at startup, which fails silently. |
-| `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` | — | **Legacy, no effect.** Read by `daemon/config.py` into `SandboxConfig` fields that nothing reads. Do not set them — the sandbox needs no model key. |
+| `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` / `SANDBOX_DEFAULT_MODEL` | — | **Not read.** The daemon reads no model keys or model name from its environment and forwards none into the container (`daemon/config.py`) — the sandbox is a keyless execution environment. Don't set them here. (`PRAX_SANDBOX_OPENCODE_HOST` / `…_PASSWORD` / `OPENCODE_SERVER_PASSWORD` were dropped on 2026-09-07 with the OpenCode server they configured.) |
 | `PRAX_SANDBOX_CONTAINER_LABEL` | `com.docker.compose.service=sandbox` | How the daemon finds the container to exec into |
 | `PRAX_SANDBOX_WORKSPACE_DIR` | `/workspace` | Per-user workspace root for the file API |
 | `PRAX_SANDBOX_ALLOW_REBUILD` | `false` | Allow `docker build` image rebuild |

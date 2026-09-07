@@ -16,8 +16,8 @@ small Python client that has **no dependency on any harness**.
 > solution archiving, SSE live output). All of that is gone: the sandbox is a
 > **pure execution environment** and needs **no model API key** (this repo's
 > compose files pass none). Rationale: prax `docs/security/sandbox-execution-boundary.md`.
-> Some residue remains in code and in the remote compose file — see *Known gaps*
-> below.
+> Some residue remains on the client dataclass and in code comments — see *Known
+> gaps* below.
 
 ## Layout
 
@@ -95,7 +95,7 @@ bearer token — see **[docs/remote.md](docs/remote.md)**.
 - [x] Constant-time bearer auth on every `/v1` route (incl. the CDP WS upgrade), layered under optional mTLS
 - [x] Authenticated CDP proxy — auth-before-dial
 - [x] Fail-closed config (no token → refuse start; non-loopback plaintext bind refused)
-- [x] Remote compose publishes only the daemon's TLS `:8843`; sandbox ports stay internal — **but that compose file cannot currently start; see Known gaps**
+- [x] Remote compose publishes only the daemon's TLS `:8843`; sandbox ports stay internal (healthcheck `pgrep -x supervisord`; the only required secret is the daemon token — not yet brought up live end-to-end, see *Planned*)
 
 **Client transport seam**
 - [x] Harness-agnostic `SandboxClient` / `SandboxConfig` over a Transport seam (in-process docker socket vs HTTP daemon, selected solely by `daemon_url`)
@@ -105,14 +105,14 @@ bearer token — see **[docs/remote.md](docs/remote.md)**.
 
 ### Known gaps (2026-09)
 
-- **`docker-compose.remote.yml` cannot start as committed.** Its `sandbox` healthcheck still curls the removed OpenCode `:4096` (line 29), the `daemon` service waits on `condition: service_healthy` (lines 60-62), and line 48 still requires `OPENCODE_SERVER_PASSWORD` for the removed subsystem. The local `docker-compose.yml` was updated to `pgrep -x supervisord` and works.
-- **Residue of the removed subsystem in code.** `prax_sandbox/daemon/config.py` still reads `PRAX_SANDBOX_OPENCODE_*`, `ANTHROPIC_API_KEY` and `OPENAI_API_KEY` from the daemon's env into `SandboxConfig` fields (`anthropic_key`, `openai_key`, `opencode_password`, `host`, `default_model`) that the control plane never reads; `daemon/app.py` still probes `:4096` at startup when that password is set; `SandboxConfig` keeps `anthropic_key` / `openai_key` / `opencode_password` and the session-policy fields, none of which the control plane reads; `transport._iter_sse` has no callers.
+- **Residue of the removed subsystem on the client dataclass.** `SandboxConfig` keeps `host`, `default_model`, `anthropic_key` / `openai_key` / `opencode_password` and the session-policy fields, none of which the control plane reads (kept for source-compatibility with harnesses that still pass them); `transport._iter_sse` has no callers. The daemon side was stripped on 2026-09-07: `daemon/config.py` no longer reads `PRAX_SANDBOX_OPENCODE_*`, `ANTHROPIC_API_KEY`, `OPENAI_API_KEY` or `SANDBOX_DEFAULT_MODEL` from the daemon's env, `daemon/app.py` no longer probes `:4096`, and `docker-compose.remote.yml` no longer demands `OPENCODE_SERVER_PASSWORD` (its healthcheck is `pgrep -x supervisord`).
 - **Container hardening.** The container runs as root (no `USER` in the Dockerfile; `supervisord.conf` `user=root`), Chromium launches with `--no-sandbox`, and neither compose file sets memory/pids limits, `cap_drop`, `security_opt`, or a bounded `/tmp`. The docker socket is not mounted into the sandbox container.
 - **code-server** is installed and `8443` is `EXPOSE`d, but no supervisord program starts it and neither compose file publishes `8443`.
 
 ### Planned
 
-- [ ] Fix `docker-compose.remote.yml` (healthcheck → `pgrep -x supervisord`, drop the OpenCode variables) and strip the OpenCode / model-key residue from `daemon/config.py`, `daemon/app.py` and `SandboxConfig`
+- [x] Fix `docker-compose.remote.yml` (healthcheck → `pgrep -x supervisord`, drop the OpenCode variables) and strip the OpenCode / model-key residue from `daemon/config.py` and `daemon/app.py` — done 2026-09-07
+- [ ] Drop the unread `SandboxConfig` fields (`host`, `default_model`, `anthropic_key` / `openai_key` / `opencode_password`, session policy) once consuming harnesses stop passing them, and remove `transport._iter_sse`
 - [ ] Live end-to-end integration test against a running sandbox container (a real `docker exec` round trip) — tests currently mock docker/HTTP
 - [ ] Hosted CI for this repo (the `make ci` suite exists; nothing runs it on push)
 - [ ] Container hardening: non-root user, drop `--no-sandbox`, pids/memory limits, bounded `/tmp`
@@ -120,7 +120,7 @@ bearer token — see **[docs/remote.md](docs/remote.md)**.
 - [ ] Kubernetes / Helm deployment path for the daemon + sandbox
 - [ ] Multi-tenant isolation (per-user containers/namespaces — one persistent container is shared today)
 - [ ] MCP server exposing sandbox tooling to other harnesses
-- [ ] Reconcile the remaining stale text with the persistent-only, execution-only code: `docs/` were regenerated from `sandbox/Dockerfile` / `supervisord.conf` / `entrypoint.sh` on 2026-09-06; what is left is in code comments, `docker-compose.remote.yml` and the `Makefile` `build` comment
+- [ ] Reconcile the remaining stale text with the persistent-only, execution-only code: `docs/` were regenerated from `sandbox/Dockerfile` / `supervisord.conf` / `entrypoint.sh` on 2026-09-06; what is left is in code comments
 
 ## Develop
 
