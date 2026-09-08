@@ -1,0 +1,41 @@
+name: CI
+
+# This repo had no hosted CI: `make ci` (ruff + pytest, HTTP/docker mocked)
+# existed but nothing ran it on a PR or on main, so the README's "make ci"
+# line described a local habit, not a gate. Same shape as the prax and
+# teamwork workflows: SHA-pinned actions, read-only token, bounded runtime.
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+# Least privilege: the job only reads the checkout.
+permissions:
+  contents: read
+
+# One live run per ref: a new push to a PR supersedes the run in flight; runs
+# on main are never cancelled.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    # The suite runs in seconds locally (62 tests); the default job timeout is
+    # 6 hours.
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - uses: astral-sh/setup-uv@d0d8abe699bfb85fec6de9f7adb5ae17292296ff # v6
+        with:
+          python-version: "3.13"
+
+      # The exact command a developer runs locally — single source of truth:
+      #   lint: uvx ruff@latest check .
+      #   test: uv run --python 3.13 --extra daemon pytest tests/ -q
+      # (No sandbox container is started; the docker/HTTP seams are mocked.)
+      - name: make ci
+        run: make ci
