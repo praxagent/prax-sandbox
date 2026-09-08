@@ -99,7 +99,7 @@ bearer token — see **[docs/remote.md](docs/remote.md)**.
 
 **Client transport seam**
 - [x] Harness-agnostic `SandboxClient` / `SandboxConfig` over a Transport seam (in-process docker socket vs HTTP daemon, selected solely by `daemon_url`)
-- [x] `make ci` = ruff + pytest (daemon, control-plane, file-API, transport, remote-client suites; HTTP/docker mocked). Local only — this repo has **no hosted CI workflow** (no `.github/` directory).
+- [x] `make ci` = ruff + pytest (daemon, control-plane, file-API, transport, remote-client suites; HTTP/docker mocked). Hosted: `.github/workflows/ci.yml` runs the same `make ci` on every pull request and push to `main` (added 2026-09-08).
 
 **Removed 2026-07 (#4, #5)** — the coding-agent CLIs (OpenCode / Claude Code / Codex) and the OpenCode server on `:4096`; the coding-session API (`start_session` / `send_message` / `review` / `finish` / `abort`) with its round budgets and stuck-session protection; solution archiving + search / re-execute; SSE live output; model API keys in the container env. The injected `on_output` / `resolve_workspace` / `commit` callbacks no longer drive anything (the fields remain on `SandboxConfig`).
 
@@ -114,7 +114,7 @@ bearer token — see **[docs/remote.md](docs/remote.md)**.
 - [x] Fix `docker-compose.remote.yml` (healthcheck → `pgrep -x supervisord`, drop the OpenCode variables) and strip the OpenCode / model-key residue from `daemon/config.py` and `daemon/app.py` — done 2026-09-07
 - [ ] Drop the unread `SandboxConfig` fields (`host`, `default_model`, `anthropic_key` / `openai_key` / `opencode_password`, session policy) once consuming harnesses stop passing them, and remove `transport._iter_sse`
 - [ ] Live end-to-end integration test against a running sandbox container (a real `docker exec` round trip) — tests currently mock docker/HTTP
-- [ ] Hosted CI for this repo (the `make ci` suite exists; nothing runs it on push)
+- [x] Hosted CI for this repo — `.github/workflows/ci.yml` runs `make ci` on pull requests into `main` and pushes to `main` (2026-09-08). Not yet a merge gate: `test` must be added as a required status check on `main` once the first run has reported (branch protection currently requires none).
 - [ ] Container hardening: non-root user, drop `--no-sandbox`, pids/memory limits, bounded `/tmp`
 - [ ] First-class GPU support in this repo's own compose (works today via the harness's `docker-compose.gpu.yml` + `make sandbox-gpu`)
 - [ ] Kubernetes / Helm deployment path for the daemon + sandbox
