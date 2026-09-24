@@ -9,11 +9,13 @@ single byte leaves:
   method and path are inside TLS; see ``policy.py``).
 * **Plain HTTP** arrives in absolute form and is judged on host, port, method
   and path.
-* **allow** → the host is resolved *here*, every address must be public
-  (no loopback, private, link-local, multicast or reserved ranges — so a
-  public-looking name that resolves inside cannot be used for SSRF), and the
+* **deny** → ``403`` with the reason, and **no DNS lookup**: a secret spelled
+  into a hostname cannot leave as a DNS query.
+* **allow** → only now is the host resolved, *here*; every address must be
+  public (no loopback, private, link-local, multicast or reserved ranges — so
+  a public-looking name that resolves inside cannot be used for SSRF), and the
   connection is made to the address that was checked, never re-resolved.
-* **deny** → ``403`` with the reason.
+  Plain HTTP goes out with the ``Host`` header set to the judged host.
 * **ask** → the request waits while the harness puts the question to a person
   (the admin API below); concurrent requests for the same destination share
   one question, and the answer is cached for a while so one page load does not
@@ -54,9 +56,18 @@ def is_public(ip: str) -> bool:
     return addr.is_global and not addr.is_multicast
 
 
+def _dest_key(host: str, port: int, method: str | None, path: str | None) -> str:
+    """What an answer covers. HTTPS: host and port (method and path are inside
+    TLS). Plain HTTP: also the method and path, so allowing ``GET /status`` does
+    not allow ``POST /upload`` to the same host."""
+    base = f"{host.lower()}:{port}"
+    return base if method is None else f"{base} {method.upper()} {path or '/'}"
+
+
 @dataclass
 class Pending:
     id: str
+    key: str
     host: str
     port: int
     method: str | None
@@ -81,7 +92,8 @@ class Gate:
     def __init__(self, config: GateConfig, resolver=None):
         self.cfg = config
         self._resolver = resolver or self._resolve
-        self._decisions: dict[str, tuple[str, float, str]] = {}  # dest -> (action, expires, why)
+        # dest -> (action, expires, why, granted_while_tainted)
+        self._decisions: dict[str, tuple[str, float, str, bool]] = {}
         self._pending: dict[str, Pending] = {}                   # id -> question
         self._by_dest: dict[str, str] = {}                        # dest -> pending id
         self._ids = itertools.count(1)
@@ -111,23 +123,30 @@ class Gate:
 
     # --- decisions -------------------------------------------------------------
 
+    def policy(self, host: str, port: int, method: str | None):
+        return self.cfg.policy.decide(host, port, method, tainted=self.tainted)
+
     async def decide(self, host: str, port: int, method: str | None, path: str | None) -> tuple[str, str]:
         tainted = self.tainted
         verdict = self.cfg.policy.decide(host, port, method, tainted=tainted)
         if verdict.action != ASK:
             return verdict.action, verdict.reason
-        dest = f"{host.lower()}:{port}"
+        dest = _dest_key(host, port, method, path)
         cached = self._decisions.get(dest)
         if cached and time.monotonic() < cached[1]:
-            return cached[0], f"remembered: {cached[2]}"
+            action, _, why, granted_tainted = cached
+            # An allow given while nothing private had been read does not carry
+            # into a tainted period: ask again.
+            if not (action == ALLOW and tainted and not granted_tainted):
+                return action, f"remembered: {why}"
         return await self._ask(dest, host, port, method, path, tainted)
 
     async def _ask(self, dest, host, port, method, path, tainted) -> tuple[str, str]:
         pid = self._by_dest.get(dest)
         pending = self._pending.get(pid) if pid else None
         if pending is None:
-            pending = Pending(id=str(next(self._ids)), host=host, port=port, method=method,
-                              path=path, tainted=tainted,
+            pending = Pending(id=str(next(self._ids)), key=dest, host=host, port=port,
+                              method=method, path=path, tainted=tainted,
                               future=asyncio.get_running_loop().create_future())
             self._pending[pending.id] = pending
             self._by_dest[dest] = pending.id
@@ -135,7 +154,7 @@ class Gate:
             action, why = await asyncio.wait_for(asyncio.shield(pending.future), self.cfg.ask_timeout)
         except TimeoutError:
             self._forget(pending, dest)
-            self._decisions[dest] = (DENY, time.monotonic() + self.cfg.deny_ttl, "no answer")
+            self._decisions[dest] = (DENY, time.monotonic() + self.cfg.deny_ttl, "no answer", tainted)
             return DENY, "asked; no answer in time"
         return action, why
 
@@ -148,11 +167,15 @@ class Gate:
         pending = self._pending.get(pending_id)
         if pending is None:
             return False
-        dest = f"{pending.host.lower()}:{pending.port}"
+        dest = pending.key
         action = ALLOW if allow else DENY
         why = f"{'allowed' if allow else 'denied'} by {by or 'the harness'}"
-        hold = ttl if ttl is not None else (self.cfg.allow_ttl if allow else self.cfg.deny_ttl)
-        self._decisions[dest] = (action, time.monotonic() + hold, why)
+        if allow and self.tainted and not pending.tainted:
+            # The person answered a question asked while the sandbox was clean;
+            # it has read private data since. Do not act on that answer.
+            action, why = DENY, "tainted since this was asked; ask again"
+        hold = ttl if ttl is not None else (self.cfg.allow_ttl if action == ALLOW else self.cfg.deny_ttl)
+        self._decisions[dest] = (action, time.monotonic() + hold, why, pending.tainted)
         self._forget(pending, dest)
         if pending.future and not pending.future.done():
             pending.future.set_result((action, why))
@@ -161,7 +184,9 @@ class Gate:
     def pending(self) -> list[dict]:
         now = time.monotonic()
         return [{"id": p.id, "host": p.host, "port": p.port, "method": p.method,
-                 "path": p.path, "tainted": p.tainted, "age_seconds": round(now - p.created, 1)}
+                 "path": p.path, "tainted": p.tainted, "age_seconds": round(now - p.created, 1),
+                 # How long an answer can still make a difference.
+                 "expires_in_seconds": max(0.0, round(self.cfg.ask_timeout - (now - p.created), 1))}
                 for p in self._pending.values()]
 
     # --- resolution (the SSRF check) --------------------------------------------
@@ -170,6 +195,17 @@ class Gate:
         infos = await asyncio.get_running_loop().getaddrinfo(
             host, port, type=socket.SOCK_STREAM)
         return list(dict.fromkeys(info[4][0] for info in infos))
+
+    def literal_refusal(self, host: str) -> str:
+        """Why an IP-literal destination can never be reached, or ``""`` —
+        judged without DNS (a name is only resolved once something allowed it)."""
+        try:
+            ip = str(ipaddress.ip_address(host))
+        except ValueError:
+            return ""
+        if not is_public(ip) and ip not in self.cfg.policy.allow_private_addresses:
+            return f"{host} is a non-public address"
+        return ""
 
     async def public_address(self, host: str, port: int) -> str:
         """An address for *host* that is public — checked, then pinned."""
@@ -227,20 +263,35 @@ class Gate:
             path = (url.path or "/") + (f"?{url.query}" if url.query else "")
             judged_method = method
 
-        # Resolve and check the address FIRST: a destination that can never be
-        # reached (private, loopback, metadata) is refused outright rather than
-        # put to a person, who might approve a harmless-looking name.
+        # Order matters for what leaks:
+        # 1. the policy, which needs no DNS — a denied name is never looked up,
+        #    so a secret spelled into a hostname cannot leave as a DNS query;
+        # 2. an IP literal that can never be reached is refused without
+        #    putting it to a person;
+        # 3. only then ask (still no DNS), and resolve + SSRF-check after an allow.
+        verdict = self.policy(host, port, judged_method)
+        if verdict.action == DENY:
+            why = verdict.reason
+            self.record(host=host, port=port, method=method, path=path, verdict="deny", reason=why)
+            await _respond(writer, 403, f"Blocked by the sandbox egress policy: {why}")
+            return
+        refusal = self.literal_refusal(host)
+        if refusal:
+            self.record(host=host, port=port, method=method, path=path, verdict="deny",
+                        reason=f"ssrf: {refusal}")
+            await _respond(writer, 403, f"Blocked: {refusal}")
+            return
+        action, why = await self.decide(host, port, judged_method, path)
+        if action != ALLOW:
+            self.record(host=host, port=port, method=method, path=path, verdict="deny", reason=why)
+            await _respond(writer, 403, f"Blocked by the sandbox egress policy: {why}")
+            return
         try:
             ip = await self.public_address(host, port)
         except (PermissionError, OSError) as exc:
             self.record(host=host, port=port, method=method, path=path, verdict="deny",
                         reason=f"ssrf: {exc}")
             await _respond(writer, 403, f"Blocked: {exc}")
-            return
-        action, why = await self.decide(host, port, judged_method, path)
-        if action != ALLOW:
-            self.record(host=host, port=port, method=method, path=path, verdict="deny", reason=why)
-            await _respond(writer, 403, f"Blocked by the sandbox egress policy: {why}")
             return
         self.record(host=host, port=port, method=method, path=path, verdict="allow",
                     reason=why, ip=ip)
@@ -253,17 +304,21 @@ class Gate:
                 if leftover:
                     up_writer.write(leftover)
             else:
-                up_writer.write(_origin_form(method, path, version, rest) + leftover)
+                up_writer.write(_origin_form(method, path, version, rest, host, port) + leftover)
             await up_writer.drain()
             await asyncio.gather(_copy(reader, up_writer), _copy(up_reader, writer))
         finally:
             up_writer.close()
 
 
-def _origin_form(method: str, path: str, version: str, rest: bytes) -> bytes:
+def _origin_form(method: str, path: str, version: str, rest: bytes, host: str, port: int) -> bytes:
+    """Rewrite for the upstream. The Host header is REPLACED with the host that
+    was judged: on a shared front-end (CDN) a client-chosen Host would reach a
+    different site than the one the policy allowed."""
     headers = [h for h in rest.split(b"\r\n")
-               if h and not h.lower().startswith((b"proxy-", b"connection:"))]
-    return (f"{method} {path} {version}\r\n".encode("latin-1")
+               if h and not h.lower().startswith((b"proxy-", b"connection:", b"host:"))]
+    host_header = host if port == 80 else f"{host}:{port}"
+    return (f"{method} {path} {version}\r\nHost: {host_header}\r\n".encode("latin-1")
             + b"\r\n".join(headers) + b"\r\nConnection: close\r\n\r\n")
 
 

@@ -80,3 +80,9 @@ def test_example_policy_parses_and_asks_by_default():
     assert policy.decide("clients2.google.com", 443, None, tainted=False).action == "deny"
     assert policy.decide("pypi.org", 443, None, tainted=False).action == "allow"
     assert policy.decide("github.com", 443, None, tainted=True).action == "ask"  # clean_only
+
+
+def test_chromium_keeps_the_loopback_bypass_and_one_disable_features():
+    launch = (ROOT / "sandbox" / "chromium-launch.sh").read_text()
+    assert "<-loopback>" not in launch
+    assert launch.count("--disable-features") == 1 + launch.count("# Chrome honours only the LAST --disable-features")
