@@ -91,8 +91,12 @@ network with no route anywhere, and makes `egress-gate`
 - **What an answer covers.** For plain HTTP an answer covers only that method
   and path, and the `Host` header is rewritten to the host that was judged.
   An allow given while clean is not reused once the sandbox is tainted.
-- **Ask.** A held request waits while the harness asks a person, through the
-  admin API (`127.0.0.1:${EGRESS_ADMIN_PORT:-8790}`, bearer token). Requests
+- **Ask.** A held request waits while a person is asked, through the admin API
+  (`127.0.0.1:${EGRESS_ADMIN_PORT:-8790}`). **Give the admin token
+  (`EGRESS_ADMIN_TOKEN`) to the relay that carries a person's answers**, e.g.
+  TeamWork's `EGRESS_GATES`, **never to the agent**: whoever holds it can
+  approve anything. The agent gets `EGRESS_TAINT_TOKEN`, which can only raise
+  taint. Requests
   for one destination share one question, the answer is remembered for
   `EGRESS_ALLOW_TTL` seconds, and no answer means deny.
 - **Taint.** The harness can mark the sandbox tainted (`POST /taint`) while the

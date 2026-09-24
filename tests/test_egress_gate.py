@@ -341,3 +341,25 @@ def test_pending_questions_say_how_long_an_answer_still_counts():
         await _admin(admin, "POST", f"/pending/{pend[0]['id']}", {"allow": False})
         await task
     asyncio.run(run())
+
+
+def test_the_taint_token_can_only_make_things_stricter():
+    async def run():
+        gate = Gate(GateConfig(policy=Policy.from_dict({"default": "ask"}), admin_token=TOKEN,
+                               taint_token="taint-only"), resolver=_resolver)
+        admin = await asyncio.start_server(lambda r, w: handle_admin(gate, r, w), "127.0.0.1", 0)
+        port = admin.sockets[0].getsockname()[1]
+        t = "taint-only"
+        assert (await _admin(port, "POST", "/taint", {"tainted": True, "reason": "x"}, token=t))[0] == 200
+        assert gate.tainted
+        # It cannot clear taint, list questions, or answer them.
+        assert (await _admin(port, "POST", "/taint", {"tainted": False}, token=t))[0] == 403
+        assert (await _admin(port, "GET", "/pending", token=t))[0] == 403
+        assert (await _admin(port, "POST", "/pending/1", {"allow": True}, token=t))[0] == 403
+        assert gate.tainted
+        # And a short raise never shortens a longer taint.
+        gate.set_taint(True, "long", ttl=600)
+        await _admin(port, "POST", "/taint", {"tainted": True, "ttl": 1}, token=t)
+        assert gate._tainted_until - time.monotonic() > 500
+    import time
+    asyncio.run(run())

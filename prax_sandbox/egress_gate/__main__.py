@@ -2,7 +2,10 @@
 
 Environment:
   EGRESS_POLICY         path to the JSON policy (see policy.py)
-  EGRESS_ADMIN_TOKEN    bearer token for the admin API (required)
+  EGRESS_ADMIN_TOKEN    bearer token for the admin API (required) — for the relay
+                        that carries a PERSON's answers (TeamWork), never the agent
+  EGRESS_TAINT_TOKEN    raise-only token for the harness: may mark the sandbox
+                        tainted, nothing else
   EGRESS_PROXY_PORT     proxy port on the sandbox network   (default 3128)
   EGRESS_ADMIN_PORT     admin API port                       (default 8790)
   EGRESS_ASK_TIMEOUT    seconds a request waits for an answer (default 120)
@@ -53,6 +56,7 @@ async def main() -> None:
     policy = Policy.load(os.environ.get("EGRESS_POLICY", "/etc/egress/policy.json"))
     gate = Gate(GateConfig(
         policy=policy, admin_token=token,
+        taint_token=os.environ.get("EGRESS_TAINT_TOKEN", ""),
         ask_timeout=float(os.environ.get("EGRESS_ASK_TIMEOUT", "120")),
         allow_ttl=float(os.environ.get("EGRESS_ALLOW_TTL", "600")),
     ))

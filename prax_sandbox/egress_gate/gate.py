@@ -81,6 +81,11 @@ class Pending:
 class GateConfig:
     policy: Policy
     admin_token: str
+    # Raise-only credential for the party whose traffic is being judged (the
+    # harness): it may mark the sandbox tainted, never answer a question and
+    # never clear taint. The admin token belongs to whoever relays a PERSON's
+    # answers — not to the agent, or the agent could approve its own requests.
+    taint_token: str = ""
     ask_timeout: float = 120.0
     allow_ttl: float = 600.0     # how long a person's "allow" covers a destination
     deny_ttl: float = 60.0       # how long a "deny"/no-answer is remembered
@@ -108,10 +113,13 @@ class Gate:
     def tainted(self) -> bool:
         return time.monotonic() < self._tainted_until
 
-    def set_taint(self, tainted: bool, reason: str = "", ttl: float | None = None) -> None:
+    def set_taint(self, tainted: bool, reason: str = "", ttl: float | None = None,
+                  raise_only: bool = False) -> None:
         was = self.tainted
         if tainted:
-            self._tainted_until = time.monotonic() + (ttl or self.cfg.taint_ttl)
+            until = time.monotonic() + (ttl or self.cfg.taint_ttl)
+            # A raise-only caller can extend taint, never shorten it.
+            self._tainted_until = max(self._tainted_until, until) if raise_only else until
             self._taint_reason = reason
             if not was:
                 # A person's earlier "allow" was given while nothing private had
@@ -150,11 +158,16 @@ class Gate:
                               future=asyncio.get_running_loop().create_future())
             self._pending[pending.id] = pending
             self._by_dest[dest] = pending.id
+        remaining = max(0.0, self.cfg.ask_timeout - (time.monotonic() - pending.created))
         try:
-            action, why = await asyncio.wait_for(asyncio.shield(pending.future), self.cfg.ask_timeout)
+            action, why = await asyncio.wait_for(asyncio.shield(pending.future), remaining)
         except TimeoutError:
+            # Resolve for EVERY waiter: a late joiner must not wait on a question
+            # no one can see or answer any more.
             self._forget(pending, dest)
             self._decisions[dest] = (DENY, time.monotonic() + self.cfg.deny_ttl, "no answer", tainted)
+            if not pending.future.done():
+                pending.future.set_result((DENY, "asked; no answer in time"))
             return DENY, "asked; no answer in time"
         return action, why
 
@@ -172,10 +185,12 @@ class Gate:
         why = f"{'allowed' if allow else 'denied'} by {by or 'the harness'}"
         if allow and self.tainted and not pending.tainted:
             # The person answered a question asked while the sandbox was clean;
-            # it has read private data since. Do not act on that answer.
-            action, why = DENY, "tainted since this was asked; ask again"
-        hold = ttl if ttl is not None else (self.cfg.allow_ttl if action == ALLOW else self.cfg.deny_ttl)
-        self._decisions[dest] = (action, time.monotonic() + hold, why, pending.tainted)
+            # it has read private data since. Refuse this request but remember
+            # nothing, so the retry is a fresh question, not a cached deny.
+            action, why = DENY, "tainted since this was asked; the next attempt asks again"
+        else:
+            hold = ttl if ttl is not None else (self.cfg.allow_ttl if action == ALLOW else self.cfg.deny_ttl)
+            self._decisions[dest] = (action, time.monotonic() + hold, why, pending.tainted)
         self._forget(pending, dest)
         if pending.future and not pending.future.done():
             pending.future.set_result((action, why))
@@ -203,7 +218,7 @@ class Gate:
             ip = str(ipaddress.ip_address(host))
         except ValueError:
             return ""
-        if not is_public(ip) and ip not in self.cfg.policy.allow_private_addresses:
+        if not is_public(ip) and not self.cfg.policy.private_allowed(ip):
             return f"{host} is a non-public address"
         return ""
 
@@ -215,8 +230,7 @@ class Gate:
             addrs = await self._resolver(host, port)
         if not addrs:
             raise PermissionError(f"{host} did not resolve")
-        exempt = self.cfg.policy.allow_private_addresses
-        bad = [a for a in addrs if not is_public(a) and a not in exempt]
+        bad = [a for a in addrs if not is_public(a) and not self.cfg.policy.private_allowed(a)]
         if bad:
             raise PermissionError(f"{host} resolves to a non-public address ({bad[0]})")
         return addrs[0]
@@ -373,13 +387,26 @@ async def handle_admin(gate: Gate, reader, writer) -> None:
         method, path, _ = lines[0].split(" ", 2)
         headers = {k.strip().lower(): v.strip() for k, _, v in (ln.partition(":") for ln in lines[1:])}
         token = headers.get("authorization", "").removeprefix("Bearer ").strip()
-        if not gate.cfg.admin_token or not hmac.compare_digest(token, gate.cfg.admin_token):
+        if gate.cfg.admin_token and hmac.compare_digest(token, gate.cfg.admin_token):
+            role = "admin"
+        elif gate.cfg.taint_token and hmac.compare_digest(token, gate.cfg.taint_token):
+            role = "taint"
+        else:
             await _json(writer, 401, {"error": "unauthorized"})
             return
         length = int(headers.get("content-length") or 0)
         raw = leftover + (await reader.readexactly(length - len(leftover))
                           if length > len(leftover) else b"")
         body = json.loads(raw[:length]) if length else {}
+
+        if role == "taint":
+            # The judged party may only make things stricter.
+            if method == "POST" and path == "/taint" and body.get("tainted"):
+                gate.set_taint(True, str(body.get("reason", "")), body.get("ttl"), raise_only=True)
+                await _json(writer, 200, {"tainted": gate.tainted})
+            else:
+                await _json(writer, 403, {"error": "the taint token can only raise taint"})
+            return
 
         if method == "GET" and path == "/status":
             await _json(writer, 200, {"tainted": gate.tainted, "taint_reason": gate._taint_reason,
