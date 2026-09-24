@@ -69,7 +69,12 @@ class Verdict:
 class Policy:
     default: str = ASK
     rules: list[Rule] = field(default_factory=list)
-    allow_private_addresses: frozenset[str] = frozenset()
+    allow_private_addresses: tuple = ()   # ip_network objects: exact IPs or CIDRs
+
+    def private_allowed(self, ip: str) -> bool:
+        import ipaddress
+        addr = ipaddress.ip_address(ip)
+        return any(addr in net for net in self.allow_private_addresses)
 
     @classmethod
     def from_dict(cls, data: dict) -> Policy:
@@ -88,8 +93,10 @@ class Policy:
                 methods=frozenset(str(m).upper() for m in raw.get("methods", [])),
                 clean_only=bool(raw.get("clean_only", False)),
             ))
-        return cls(default=default, rules=rules,
-                   allow_private_addresses=frozenset(data.get("allow_private_addresses", [])))
+        import ipaddress
+        nets = tuple(ipaddress.ip_network(str(a), strict=False)
+                     for a in data.get("allow_private_addresses", []))
+        return cls(default=default, rules=rules, allow_private_addresses=nets)
 
     @classmethod
     def load(cls, path: str) -> Policy:

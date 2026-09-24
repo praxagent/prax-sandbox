@@ -40,7 +40,11 @@ services:
       - ./prax_sandbox:/app/prax_sandbox:ro
       - ${EGRESS_POLICY_FILE:-./egress-policy.example.json}:/etc/egress/policy.json:ro
     environment:
+      # Admin: for the relay that carries a PERSON's answers (TeamWork) — never
+      # give it to the agent, or it could approve its own requests.
       EGRESS_ADMIN_TOKEN: ${EGRESS_ADMIN_TOKEN:?set EGRESS_ADMIN_TOKEN (e.g. openssl rand -hex 32)}
+      # Raise-only: for the harness (Prax) to mark the sandbox tainted.
+      EGRESS_TAINT_TOKEN: ${EGRESS_TAINT_TOKEN:-}
       EGRESS_ASK_TIMEOUT: ${EGRESS_ASK_TIMEOUT:-120}
       EGRESS_ALLOW_TTL: ${EGRESS_ALLOW_TTL:-600}
       INGRESS_RELAY: "9223:sandbox:9223,6080:sandbox:6080,6090:sandbox:6090"
