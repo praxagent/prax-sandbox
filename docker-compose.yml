@@ -18,10 +18,13 @@ services:
     # Bound to localhost only — these endpoints are UNAUTHENTICATED. Never
     # expose them to a network; for remote access run the daemon instead
     # (docker-compose.remote.yml).
+    # Host ports are overridable so a second checkout on the same machine (a
+    # dev tree beside production) can run its own sandbox; the defaults are
+    # the historical fixed ports.
     ports:
-      - "127.0.0.1:9223:9223"   # Chrome DevTools Protocol
-      - "127.0.0.1:6080:6080"   # noVNC desktop
-      - "127.0.0.1:6090:6090"   # clipboard bridge
+      - "127.0.0.1:${SANDBOX_CDP_PORT:-9223}:9223"         # Chrome DevTools Protocol
+      - "127.0.0.1:${SANDBOX_VNC_PORT:-6080}:6080"         # noVNC desktop
+      - "127.0.0.1:${SANDBOX_CLIPBOARD_PORT:-6090}:6090"   # clipboard bridge
     volumes:
       - ${WORKSPACE_DIR:-./workspace}:/workspace
     healthcheck:

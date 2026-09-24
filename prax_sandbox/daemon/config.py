@@ -45,6 +45,9 @@ class DaemonConfig:
     # Rebuilding the sandbox image runs `docker build` as root — dangerous for a
     # multi-tenant remote daemon. Off by default; enable only for a trusted box.
     allow_rebuild: bool = False
+    # Enforce each exec's deadline inside the container (see
+    # SandboxConfig.enforce_exec_timeout). Off by default: prior behaviour.
+    enforce_exec_timeout: bool = False
 
     @classmethod
     def from_env(cls, env: dict | None = None) -> DaemonConfig:
@@ -70,6 +73,7 @@ class DaemonConfig:
             max_payload_bytes=int(e.get("PRAX_SANDBOX_MAX_PAYLOAD_BYTES", str(100 * 1024 * 1024))),
             request_timeout=int(e.get("PRAX_SANDBOX_REQUEST_TIMEOUT", "600")),
             allow_rebuild=_bool(e.get("PRAX_SANDBOX_ALLOW_REBUILD"), False),
+            enforce_exec_timeout=_bool(e.get("PRAX_SANDBOX_ENFORCE_EXEC_TIMEOUT"), False),
         )
 
     def to_sandbox_config(self) -> SandboxConfig:
@@ -79,6 +83,7 @@ class DaemonConfig:
             persistent=True,
             workspace_dir=self.workspace_dir,
             container_label=self.container_label,
+            enforce_exec_timeout=self.enforce_exec_timeout,
             # anthropic_key/openai_key/default_model are NOT forwarded — the
             # daemon reads none; SandboxConfig's own (None) defaults apply.
             # on_output/resolve_workspace/commit stay None -> control plane's
