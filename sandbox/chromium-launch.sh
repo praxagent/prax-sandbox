@@ -12,7 +12,23 @@ set -e
 
 PROFILE_DIR=/root/.browser_profiles/default
 
+# Behind the egress gate (docker-compose.egress.yml) the container has no route
+# out except the proxy, so Chrome must use it explicitly.
+# Behind the gate every connection is a policy decision, so Chrome's own
+# background traffic (component updates, time checks, safe-browsing, sync)
+# is switched off rather than turned into a stream of questions for a person.
+PROXY_ARGS=()
+if [ -n "${HTTPS_PROXY:-}" ]; then
+  PROXY_ARGS=(
+    --proxy-server="$HTTPS_PROXY" --proxy-bypass-list="<-loopback>"
+    --disable-background-networking --disable-component-update
+    --disable-sync --disable-domain-reliability --no-pings
+    --disable-features=OptimizationHints,MediaRouter
+  )
+fi
+
 exec /usr/bin/chromium-browser \
+  "${PROXY_ARGS[@]}" \
   --no-sandbox \
   --disable-gpu \
   --disable-dev-shm-usage \
