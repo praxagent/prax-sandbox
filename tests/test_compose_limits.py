@@ -38,3 +38,12 @@ def test_base_compose_is_unchanged_by_default():
     # or "default-off" would be false.
     base = (ROOT / "docker-compose.yml").read_text()
     assert "mem_limit" not in base and "tmpfs" not in base
+
+
+def test_host_ports_are_overridable_with_historical_defaults():
+    # A dev tree beside production passes SANDBOX_*_PORT; ignoring them made
+    # the two sandboxes collide on the same loopback ports.
+    base = (ROOT / "docker-compose.yml").read_text()
+    for var, port in (("SANDBOX_CDP_PORT", 9223), ("SANDBOX_VNC_PORT", 6080),
+                      ("SANDBOX_CLIPBOARD_PORT", 6090)):
+        assert f'"127.0.0.1:${{{var}:-{port}}}:{port}"' in base
