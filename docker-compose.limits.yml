@@ -1,0 +1,40 @@
+# Resource limits and a narrower privilege set for the sandbox — opt-in.
+#
+#   docker compose -f docker-compose.yml -f docker-compose.limits.yml up -d
+#   # or persistently:  COMPOSE_FILE=docker-compose.yml:docker-compose.limits.yml
+#
+# Without this file the container has no memory, process or /tmp bound: on
+# 2026-07-08 an ffmpeg with an unbounded source wrote a 21 GB WAV into the
+# container's /tmp — which is the host disk — and took every tool call down
+# with "No space left on device". A limit applied with `docker update` instead
+# of here is lost the next time compose recreates the container.
+#
+# What this contains, and what it does not:
+#   * /tmp is a sized tmpfs, so a runaway write there fails with ENOSPC inside
+#     the container. tmpfs pages count toward the memory limit, so keep
+#     SANDBOX_TMP_SIZE well under SANDBOX_MEM_LIMIT.
+#   * Writes to /workspace (a host bind mount) or elsewhere on the root
+#     filesystem are NOT bounded — Docker cannot size those without
+#     filesystem quotas. /tmp is where scratch output lands in practice.
+#   * pids_limit stops a fork bomb, including a process that setsid'd itself
+#     out of an exec's timeout.
+#   * The dropped capabilities are ones nothing in this image uses (raw
+#     sockets, device nodes, chroot, file capabilities, audit). The container
+#     still runs as root — see prax docs/security/sandbox-execution-boundary.md.
+services:
+  sandbox:
+    mem_limit: ${SANDBOX_MEM_LIMIT:-3g}
+    memswap_limit: ${SANDBOX_MEM_LIMIT:-3g}   # equal to mem_limit: no swap on top
+    pids_limit: ${SANDBOX_PIDS_LIMIT:-1024}
+    tmpfs:
+      # `exec` because scripts and build steps run from /tmp; Docker's tmpfs
+      # default is noexec.
+      - /tmp:size=${SANDBOX_TMP_SIZE:-1g},mode=1777,exec
+    cap_drop:
+      - NET_RAW
+      - MKNOD
+      - AUDIT_WRITE
+      - SETFCAP
+      - SYS_CHROOT
+    security_opt:
+      - no-new-privileges:true
