@@ -1,0 +1,56 @@
+# Egress gate — the sandbox's only way out is a policy proxy. Opt-in.
+#
+#   EGRESS_ADMIN_TOKEN=$(openssl rand -hex 32) \
+#   docker compose -f docker-compose.yml -f docker-compose.egress.yml up -d
+#
+# Without this file the sandbox reaches the internet directly, and nothing
+# outside the agent decides what it may send where. With it:
+#
+#   * the sandbox sits on `cell`, an INTERNAL network: no route anywhere;
+#   * `egress-gate` is on `cell` and the normal network, and is the only way
+#     out — every connection is allowed, denied, or held while a person is
+#     asked (prax_sandbox/egress_gate/gate.py), and names that resolve to
+#     private/loopback/link-local addresses are refused after DNS (SSRF);
+#   * a container on an internal network cannot publish ports, so the gate
+#     container also relays CDP / noVNC / clipboard from the host's loopback
+#     into the sandbox (INGRESS_RELAY). `docker exec` does not use the network
+#     and is unaffected.
+#
+# The admin API (127.0.0.1:${EGRESS_ADMIN_PORT:-8790}, bearer token) is how a
+# harness answers "ask" and sets the taint flag. Policy: EGRESS_POLICY_FILE,
+# default egress-policy.example.json — copy it and edit.
+services:
+  sandbox:
+    networks: !override [cell]
+    ports: !reset []
+    environment:
+      HTTP_PROXY: http://egress-gate:3128
+      HTTPS_PROXY: http://egress-gate:3128
+      http_proxy: http://egress-gate:3128
+      https_proxy: http://egress-gate:3128
+      NO_PROXY: localhost,127.0.0.1
+      no_proxy: localhost,127.0.0.1
+
+  egress-gate:
+    image: python:3.13-slim
+    restart: unless-stopped
+    working_dir: /app
+    command: ["python", "-m", "prax_sandbox.egress_gate"]
+    volumes:
+      - ./prax_sandbox:/app/prax_sandbox:ro
+      - ${EGRESS_POLICY_FILE:-./egress-policy.example.json}:/etc/egress/policy.json:ro
+    environment:
+      EGRESS_ADMIN_TOKEN: ${EGRESS_ADMIN_TOKEN:?set EGRESS_ADMIN_TOKEN (e.g. openssl rand -hex 32)}
+      EGRESS_ASK_TIMEOUT: ${EGRESS_ASK_TIMEOUT:-120}
+      EGRESS_ALLOW_TTL: ${EGRESS_ALLOW_TTL:-600}
+      INGRESS_RELAY: "9223:sandbox:9223,6080:sandbox:6080,6090:sandbox:6090"
+    networks: [cell, default]
+    ports:
+      - "127.0.0.1:${EGRESS_ADMIN_PORT:-8790}:8790"
+      - "127.0.0.1:${SANDBOX_CDP_PORT:-9223}:9223"
+      - "127.0.0.1:${SANDBOX_VNC_PORT:-6080}:6080"
+      - "127.0.0.1:${SANDBOX_CLIPBOARD_PORT:-6090}:6090"
+
+networks:
+  cell:
+    internal: true

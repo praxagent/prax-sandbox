@@ -36,6 +36,11 @@ docker compose up -d     # publishes, on 127.0.0.1 only: CDP :9223, noVNC deskto
 # Recommended: add the resource-limits overlay (memory, pids, a 1 GB tmpfs /tmp,
 # dropped capabilities) — opt-in so the default stays what it was:
 #   docker compose -f docker-compose.yml -f docker-compose.limits.yml up -d
+# And the egress gate: the sandbox's only way out becomes a policy proxy that
+# allows, denies, or holds each destination while a person is asked
+# (see "Egress gate" below):
+#   EGRESS_ADMIN_TOKEN=$(openssl rand -hex 32) docker compose \
+#     -f docker-compose.yml -f docker-compose.limits.yml -f docker-compose.egress.yml up -d
 
 # 2. Drive it from your harness (no prax required)
 pip install -e .
@@ -66,6 +71,45 @@ The client talks to the control plane in-process (it holds the docker socket).
 To run the sandbox on a **remote server** (with or without Tailscale), run the
 control daemon (`prax-sandbox-daemon`) and point the same client at its URL +
 bearer token — see **[docs/remote.md](docs/remote.md)**.
+
+## Egress gate
+
+`docker-compose.egress.yml` (opt-in) moves the sandbox onto an internal Docker
+network with no route anywhere, and makes `egress-gate`
+(`prax_sandbox/egress_gate/`, stdlib-only) its single way out:
+
+- **Every connection is decided first.** HTTPS is judged on host and port (the
+  method and path are inside TLS); plain HTTP on host, port, method and path.
+  Policy: `EGRESS_POLICY_FILE`, see `egress-policy.example.json` and
+  `policy.py`. Rules are `allow`, `deny` or `ask`; the default is usually `ask`.
+- **SSRF-safe.** The gate resolves the name itself, refuses any private,
+  loopback, link-local or reserved address before asking anyone, and connects
+  to the address it checked, so the name is never resolved twice.
+- **Ask.** A held request waits while the harness asks a person, through the
+  admin API (`127.0.0.1:${EGRESS_ADMIN_PORT:-8790}`, bearer token). Requests
+  for one destination share one question, the answer is remembered for
+  `EGRESS_ALLOW_TTL` seconds, and no answer means deny.
+- **Taint.** The harness can mark the sandbox tainted (`POST /taint`) while the
+  work in flight has read private data. `clean_only` rules then stop applying,
+  so those destinations fall back to asking. This is per container, not per
+  process.
+- **Logging.** Every decision is one JSON line on the gate's stdout.
+- **Ports.** CDP, noVNC and the clipboard bridge are relayed from host loopback
+  through the gate container. When proxied, Chromium runs with its background
+  networking switched off.
+
+Verified live against the real image (2026-09-24):
+- allowed registries work, and denied hosts get a 403;
+- a direct connection that bypasses the proxy has no route;
+- the metadata address is refused without prompting anyone;
+- an asked request completes once approved, and the answer is remembered;
+- Chromium loads pages through the gate.
+
+**Limits:**
+- HTTPS is judged per host, not per request (no TLS interception).
+- Taint is per container.
+- A fresh profile still asks about a few startup destinations (the start page,
+  Chrome's account check).
 
 ## Docs
 
