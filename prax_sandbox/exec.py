@@ -10,6 +10,7 @@ from __future__ import annotations
 import logging
 import shlex
 import subprocess
+import time
 
 from prax_sandbox_client.config import SandboxConfig
 
@@ -19,6 +20,7 @@ logger = logging.getLogger(__name__)
 # returns when the deadline passed (a KILL after the grace period gives 137).
 _KILL_GRACE_SECONDS = 5
 _TIMED_OUT = 124
+_KILLED = 137
 
 
 def _get_docker_client():
@@ -82,6 +84,7 @@ def exec_in_sandbox(
     if enforced:
         argv = ["timeout", "-k", str(_KILL_GRACE_SECONDS), str(int(timeout)), *argv]
 
+    started = time.monotonic()
     exit_code, output = container.exec_run(
         argv,
         demux=True,
@@ -90,7 +93,11 @@ def exec_in_sandbox(
     stdout = (output[0] or b"").decode(errors="replace") if output else ""
     stderr = (output[1] or b"").decode(errors="replace") if output else ""
 
-    if enforced and exit_code == _TIMED_OUT:
+    if enforced and (exit_code == _TIMED_OUT or
+                     (exit_code == _KILLED and time.monotonic() - started >= timeout)):
+        # 124: stopped by TERM. 137 after the deadline: it ignored TERM and was
+        # KILLed five seconds later (137 before the deadline is something else,
+        # e.g. the memory limit, and is left alone).
         stderr += (
             f"\n[sandbox] command timed out after {int(timeout)}s and was stopped."
         )

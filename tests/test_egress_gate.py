@@ -228,3 +228,116 @@ def test_unreachable_destinations_are_refused_without_asking_anyone():
         assert (await _admin(admin, "GET", "/pending"))[1]["pending"] == []
         server.close()
     asyncio.run(run())
+
+
+# --- review follow-ups ---------------------------------------------------------
+
+def test_a_denied_name_is_never_looked_up():
+    looked_up = []
+
+    async def spying_resolver(host, port):
+        looked_up.append(host)
+        return ["127.0.0.1"]
+
+    async def run():
+        server, up = await _upstream()
+        gate = Gate(GateConfig(policy=Policy.from_dict({"default": "deny"}), admin_token=TOKEN),
+                    resolver=spying_resolver)
+        proxy = await asyncio.start_server(gate.handle, "127.0.0.1", 0)
+        out = await _connect_via_proxy(proxy.sockets[0].getsockname()[1], "s3cret.attacker.example", up)
+        assert b"403" in out
+        server.close()
+    asyncio.run(run())
+    assert looked_up == []  # no DNS query carried the name out
+
+
+def test_a_name_is_not_looked_up_while_it_is_only_being_asked_about():
+    looked_up = []
+
+    async def spying_resolver(host, port):
+        looked_up.append(host)
+        return ["127.0.0.1"]
+
+    async def run():
+        gate = Gate(GateConfig(policy=Policy.from_dict({"default": "ask", "allow_private_addresses": ["127.0.0.1"]}),
+                               admin_token=TOKEN, ask_timeout=0.2), resolver=spying_resolver)
+        proxy = await asyncio.start_server(gate.handle, "127.0.0.1", 0)
+        await _connect_via_proxy(proxy.sockets[0].getsockname()[1], "unanswered.example", 443)
+    asyncio.run(run())
+    assert looked_up == []
+
+
+def test_an_allow_given_while_clean_is_not_reused_once_tainted():
+    async def run():
+        server, up = await _upstream()
+        gate, proxy, admin = await _gate({"default": "ask"}, ask_timeout=0.5)
+        task = asyncio.create_task(_connect_via_proxy(proxy, "news.example", up))
+        for _ in range(50):
+            await asyncio.sleep(0.02)
+            pend = (await _admin(admin, "GET", "/pending"))[1]["pending"]
+            if pend:
+                break
+        await _admin(admin, "POST", f"/pending/{pend[0]['id']}", {"allow": True})
+        assert (await task).endswith(b"hello")
+        gate.set_taint(True, "read private data")
+        # Remembered allow was granted clean: tainted, it must be asked again
+        # (and here nobody answers, so it is denied).
+        assert b"403" in (await _connect_via_proxy(proxy, "news.example", up))
+        server.close()
+    asyncio.run(run())
+
+
+def test_an_answer_to_a_clean_question_is_void_if_taint_arrived_meanwhile():
+    async def run():
+        server, up = await _upstream()
+        gate, proxy, admin = await _gate({"default": "ask"})
+        task = asyncio.create_task(_connect_via_proxy(proxy, "late.example", up))
+        for _ in range(50):
+            await asyncio.sleep(0.02)
+            pend = (await _admin(admin, "GET", "/pending"))[1]["pending"]
+            if pend:
+                break
+        gate.set_taint(True, "read private data")
+        await _admin(admin, "POST", f"/pending/{pend[0]['id']}", {"allow": True})
+        assert b"403" in (await task)
+        server.close()
+    asyncio.run(run())
+
+
+def test_plain_http_answers_cover_only_that_method_and_path():
+    async def run():
+        server, up = await _upstream()
+        gate, proxy, admin = await _gate({"default": "ask"}, ask_timeout=0.3)
+        task = asyncio.create_task(_get_via_proxy(proxy, "api.example", up, "GET"))
+        for _ in range(50):
+            await asyncio.sleep(0.02)
+            pend = (await _admin(admin, "GET", "/pending"))[1]["pending"]
+            if pend:
+                break
+        await _admin(admin, "POST", f"/pending/{pend[0]['id']}", {"allow": True})
+        assert (await task).endswith(b"hello")
+        # Same host, different method: a new question (unanswered -> denied).
+        assert b"403" in (await _get_via_proxy(proxy, "api.example", up, "POST"))
+        server.close()
+    asyncio.run(run())
+
+
+def test_the_host_header_is_the_judged_host():
+    from prax_sandbox.egress_gate.gate import _origin_form
+    out = _origin_form("GET", "/x", "HTTP/1.1", b"Host: evil.example\r\nAccept: */*", "ok.example", 80)
+    assert b"Host: ok.example\r\n" in out and b"evil.example" not in out
+
+
+def test_pending_questions_say_how_long_an_answer_still_counts():
+    async def run():
+        gate, proxy, admin = await _gate({"default": "ask"}, ask_timeout=30)
+        task = asyncio.create_task(_connect_via_proxy(proxy, "q.example", 443))
+        for _ in range(50):
+            await asyncio.sleep(0.02)
+            pend = (await _admin(admin, "GET", "/pending"))[1]["pending"]
+            if pend:
+                break
+        assert 0 < pend[0]["expires_in_seconds"] <= 30
+        await _admin(admin, "POST", f"/pending/{pend[0]['id']}", {"allow": False})
+        await task
+    asyncio.run(run())

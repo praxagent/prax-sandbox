@@ -82,9 +82,15 @@ network with no route anywhere, and makes `egress-gate`
   method and path are inside TLS); plain HTTP on host, port, method and path.
   Policy: `EGRESS_POLICY_FILE`, see `egress-policy.example.json` and
   `policy.py`. Rules are `allow`, `deny` or `ask`; the default is usually `ask`.
-- **SSRF-safe.** The gate resolves the name itself, refuses any private,
-  loopback, link-local or reserved address before asking anyone, and connects
-  to the address it checked, so the name is never resolved twice.
+- **SSRF-safe, and no DNS leaks.** The policy runs first. A denied name is
+  never looked up, so data spelled into a hostname cannot leave as a DNS
+  query, and a name is resolved only after something allowed it. Private,
+  loopback, link-local and reserved addresses are then refused: IP literals
+  before anyone is asked, names after resolution. The gate connects to the
+  address it checked, so the name is never resolved twice.
+- **What an answer covers.** For plain HTTP an answer covers only that method
+  and path, and the `Host` header is rewritten to the host that was judged.
+  An allow given while clean is not reused once the sandbox is tainted.
 - **Ask.** A held request waits while the harness asks a person, through the
   admin API (`127.0.0.1:${EGRESS_ADMIN_PORT:-8790}`, bearer token). Requests
   for one destination share one question, the answer is remembered for
