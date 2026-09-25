@@ -72,3 +72,19 @@ def test_daemon_config_forwards_the_flag():
     off = DaemonConfig.from_env({})
     assert on.to_sandbox_config().enforce_exec_timeout is True
     assert off.to_sandbox_config().enforce_exec_timeout is False
+
+
+def test_a_command_killed_after_ignoring_term_is_still_reported_as_timed_out(container, monkeypatch):
+    t = iter([0.0, 12.0])  # started, finished: past the 7 s deadline
+    monkeypatch.setattr(sandbox_exec.time, "monotonic", lambda: next(t))
+    container.exit_code = 137
+    r = sandbox_exec.exec_in_sandbox(["x"], timeout=7, config=SandboxConfig(enforce_exec_timeout=True))
+    assert "timed out after 7s" in r.stderr
+
+
+def test_an_early_137_is_not_called_a_timeout(container, monkeypatch):
+    t = iter([0.0, 1.0])  # killed well before the deadline: e.g. the memory limit
+    monkeypatch.setattr(sandbox_exec.time, "monotonic", lambda: next(t))
+    container.exit_code = 137
+    r = sandbox_exec.exec_in_sandbox(["x"], timeout=7, config=SandboxConfig(enforce_exec_timeout=True))
+    assert "timed out" not in r.stderr

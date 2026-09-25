@@ -1,0 +1,62 @@
+{
+  "_comment": "Egress policy for the sandbox (see prax_sandbox/egress_gate/policy.py). Anything not listed is asked about. Browser telemetry/update hosts are denied outright so they never become questions. Package registries are allowed: downloads from them cannot deliver your data to a stranger. Add hosts with care; prefer 'clean_only' for general web destinations.",
+  "default": "ask",
+  "rules": [
+    {
+      "host": "clients2.google.com",
+      "action": "deny"
+    },
+    {
+      "host": "*.gvt1.com",
+      "action": "deny"
+    },
+    {
+      "host": "android.clients.google.com",
+      "action": "deny"
+    },
+    {
+      "host": "optimizationguide-pa.googleapis.com",
+      "action": "deny"
+    },
+    {
+      "host": "update.googleapis.com",
+      "action": "deny"
+    },
+    {
+      "host": "pypi.org",
+      "action": "allow"
+    },
+    {
+      "host": "files.pythonhosted.org",
+      "action": "allow"
+    },
+    {
+      "host": "registry.npmjs.org",
+      "action": "allow"
+    },
+    {
+      "host": "deb.debian.org",
+      "action": "allow"
+    },
+    {
+      "host": "security.debian.org",
+      "action": "allow"
+    },
+    {
+      "host": "github.com",
+      "action": "allow",
+      "clean_only": true
+    },
+    {
+      "host": "codeload.github.com",
+      "action": "allow",
+      "clean_only": true
+    },
+    {
+      "host": "objects.githubusercontent.com",
+      "action": "allow",
+      "clean_only": true
+    }
+  ],
+  "allow_private_addresses": []
+}
