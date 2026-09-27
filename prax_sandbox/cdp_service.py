@@ -497,11 +497,39 @@ def type_text(text: str) -> dict:
 
 
 def insert_text(text: str) -> dict:
-    """Insert *text* at the caret as one edit, as a paste would.
+    """Paste *text* at the caret, exactly as a person pasting would.
 
-    No per-key events, so editors apply no auto-indent or auto-close to it.
+    Code editors (Monaco, CodeMirror) format TYPED input — auto-indent after
+    each newline, auto-close brackets — and take a real paste verbatim.
+    Measured on a live Monaco editor (LeetCode):
+
+    - key-by-key typing and ``Input.insertText`` are both treated as typing:
+      every line indented further than the last, a stray "}" appended;
+    - a scripted ``paste`` event is cancelled by the editor and inserts nothing;
+    - the clipboard plus the browser's own paste command reproduces the text
+      exactly, and needs no clipboard permission granted to the page.
+
+    So: put the text on the browser clipboard (a user-gesture write, allowed
+    for the focused page), then send Ctrl+V as the native "paste" command.
+    If the clipboard write is refused, fall back to ``Input.insertText``,
+    which is right for plain inputs. The clipboard keeps the pasted text.
     """
+    write = (
+        f"navigator.clipboard.writeText({json.dumps(text)})"
+        ".then(() => 'ok', e => 'refused: ' + e)"
+    )
     with _lock:
+        written = _send_cdp("Runtime.evaluate", {
+            "expression": write, "awaitPromise": True,
+            "userGesture": True, "returnByValue": True,
+        })
+        if isinstance(written, dict) and written.get("result", {}).get("value") == "ok":
+            paste = {"type": "rawKeyDown", "key": "v", "code": "KeyV",
+                     "windowsVirtualKeyCode": 86, "modifiers": 2, "commands": ["paste"]}
+            _send_cdp("Input.dispatchKeyEvent", paste)
+            _send_cdp("Input.dispatchKeyEvent", {"type": "keyUp", "key": "v", "code": "KeyV",
+                                                 "windowsVirtualKeyCode": 86, "modifiers": 2})
+            return {"status": f"Pasted {len(text)} characters"}
         result = _send_cdp("Input.insertText", {"text": text})
     if isinstance(result, dict) and result.get("error"):
         return {"error": f"insert failed: {result['error']}"}

@@ -85,10 +85,40 @@ def test_single_line_text_is_still_typed_key_by_key(sent):
     assert [p["type"] for m, p in sent] == ["keyDown", "char", "keyUp"] * 2
 
 
-def test_multiline_text_is_inserted_as_one_edit(sent):
+def test_multiline_text_is_pasted_through_the_clipboard(monkeypatch):
+    # Verified live on Monaco: only a real paste keeps code verbatim.
+    calls = []
+
+    def fake(method, params=None, timeout=10):
+        calls.append((method, params))
+        if method == "Runtime.evaluate":
+            return {"result": {"type": "string", "value": "ok"}}
+        return {}
+    monkeypatch.setattr(cdp, "_send_cdp", fake)
     code = "class S {\n  int f() {\n    return 1;\n  }\n};"
-    assert cdp.type_text(code) == {"status": f"Inserted {len(code)} characters"}
-    assert sent == [("Input.insertText", {"text": code})]
+    assert cdp.type_text(code) == {"status": f"Pasted {len(code)} characters"}
+    assert calls[0][0] == "Runtime.evaluate"
+    write = calls[0][1]
+    assert write["userGesture"] is True and write["awaitPromise"] is True
+    assert '"class S {\\n  int f() {' in write["expression"]  # JSON-escaped, not spliced raw
+    down = calls[1][1]
+    assert calls[1][0] == "Input.dispatchKeyEvent"
+    assert down["commands"] == ["paste"] and down["modifiers"] == 2 and down["key"] == "v"
+    assert calls[2][1]["type"] == "keyUp"
+    assert not any(m == "Input.insertText" for m, _ in calls)
+
+
+def test_a_refused_clipboard_falls_back_to_insert_text(monkeypatch):
+    calls = []
+
+    def fake(method, params=None, timeout=10):
+        calls.append(method)
+        if method == "Runtime.evaluate":
+            return {"result": {"type": "string", "value": "refused: NotAllowedError"}}
+        return {}
+    monkeypatch.setattr(cdp, "_send_cdp", fake)
+    assert cdp.insert_text("a\nb") == {"status": "Inserted 3 characters"}
+    assert calls == ["Runtime.evaluate", "Input.insertText"]
 
 
 def test_insert_reports_a_cdp_failure(monkeypatch):
