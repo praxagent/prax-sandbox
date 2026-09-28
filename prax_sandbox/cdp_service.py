@@ -470,7 +470,17 @@ def click_at(x: int, y: int) -> dict:
 
 
 def type_text(text: str) -> dict:
-    """Type text character by character."""
+    """Type text into the focused element.
+
+    Single-line text goes key by key, so pages that listen for keystrokes
+    (search-as-you-type, autocomplete) see them. Text with a newline goes in
+    as one insertion instead: key by key, a code editor re-indents after every
+    Enter and auto-closes every bracket, so pasted code came out mangled — and
+    a bare "\n" char event did not break the line at all, leaving a whole
+    program on line 1.
+    """
+    if "\n" in text:
+        return insert_text(text)
     with _lock:
         for ch in text:
             _send_cdp("Input.dispatchKeyEvent", {
@@ -486,22 +496,138 @@ def type_text(text: str) -> dict:
     return {"status": f"Typed {len(text)} characters"}
 
 
-def press_key(key: str) -> dict:
-    """Press a special key (Enter, Tab, Escape, Backspace, etc.)."""
-    key_map = {
-        "Enter": 13, "Tab": 9, "Escape": 27, "Backspace": 8,
-        "ArrowDown": 40, "ArrowUp": 38, "ArrowLeft": 37, "ArrowRight": 39,
-    }
-    kc = key_map.get(key, 0)
+def insert_text(text: str) -> dict:
+    """Paste *text* at the caret, exactly as a person pasting would.
+
+    Code editors (Monaco, CodeMirror) format TYPED input — auto-indent after
+    each newline, auto-close brackets — and take a real paste verbatim.
+    Measured on a live Monaco editor (LeetCode):
+
+    - key-by-key typing and ``Input.insertText`` are both treated as typing:
+      every line indented further than the last, a stray "}" appended;
+    - a scripted ``paste`` event is cancelled by the editor and inserts nothing;
+    - the clipboard plus the browser's own paste command reproduces the text
+      exactly, and needs no clipboard permission granted to the page.
+
+    So: put the text on the browser clipboard (a user-gesture write, allowed
+    for the focused page), then send Ctrl+V as the native "paste" command.
+    If the clipboard write is refused, fall back to ``Input.insertText``,
+    which is right for plain inputs. The clipboard keeps the pasted text.
+    """
+    write = (
+        f"navigator.clipboard.writeText({json.dumps(text)})"
+        ".then(() => 'ok', e => 'refused: ' + e)"
+    )
     with _lock:
-        _send_cdp("Input.dispatchKeyEvent", {
-            "type": "keyDown", "key": key, "code": key,
-            "windowsVirtualKeyCode": kc, "text": "",
+        written = _send_cdp("Runtime.evaluate", {
+            "expression": write, "awaitPromise": True,
+            "userGesture": True, "returnByValue": True,
         })
+        if isinstance(written, dict) and written.get("result", {}).get("value") == "ok":
+            paste = {"type": "rawKeyDown", "key": "v", "code": "KeyV",
+                     "windowsVirtualKeyCode": 86, "modifiers": 2, "commands": ["paste"]}
+            _send_cdp("Input.dispatchKeyEvent", paste)
+            _send_cdp("Input.dispatchKeyEvent", {"type": "keyUp", "key": "v", "code": "KeyV",
+                                                 "windowsVirtualKeyCode": 86, "modifiers": 2})
+            return {"status": f"Pasted {len(text)} characters"}
+        result = _send_cdp("Input.insertText", {"text": text})
+    if isinstance(result, dict) and result.get("error"):
+        return {"error": f"insert failed: {result['error']}"}
+    return {"status": f"Inserted {len(text)} characters"}
+
+
+# Named keys: (DOM code, Windows virtual key code).
+_NAMED_KEYS = {
+    "Enter": ("Enter", 13), "Tab": ("Tab", 9), "Escape": ("Escape", 27),
+    "Backspace": ("Backspace", 8), "Delete": ("Delete", 46), "Insert": ("Insert", 45),
+    "Home": ("Home", 36), "End": ("End", 35), "PageUp": ("PageUp", 33),
+    "PageDown": ("PageDown", 34), "ArrowUp": ("ArrowUp", 38),
+    "ArrowDown": ("ArrowDown", 40), "ArrowLeft": ("ArrowLeft", 37),
+    "ArrowRight": ("ArrowRight", 39), " ": ("Space", 32), "Space": ("Space", 32),
+    **{f"F{i}": (f"F{i}", 111 + i) for i in range(1, 13)},
+}
+_KEY_ALIASES = {
+    "esc": "Escape", "return": "Enter", "del": "Delete", "space": "Space",
+    "up": "ArrowUp", "down": "ArrowDown", "left": "ArrowLeft", "right": "ArrowRight",
+    "pageup": "PageUp", "pagedown": "PageDown",
+}
+# CDP modifier bits, and each modifier's own key.
+_MODIFIERS = {
+    "alt": (1, "Alt", "AltLeft", 18), "option": (1, "Alt", "AltLeft", 18),
+    "control": (2, "Control", "ControlLeft", 17), "ctrl": (2, "Control", "ControlLeft", 17),
+    "meta": (4, "Meta", "MetaLeft", 91), "cmd": (4, "Meta", "MetaLeft", 91),
+    "command": (4, "Meta", "MetaLeft", 91),
+    "shift": (8, "Shift", "ShiftLeft", 16),
+}
+
+
+def _parse_key(spec: str) -> tuple[list[tuple], str, str, int, str] | str:
+    """``"Control+Shift+End"`` -> (modifiers, key, code, keyCode, text), or an error."""
+    parts = spec.split("+")
+    if len(parts) > 1 and parts[-1] == "":        # "Control++" presses "+"
+        parts = parts[:-2] + ["+"]
+    *mods, key = [p.strip() if p.strip() else p for p in parts]
+    modifiers = []
+    for m in mods:
+        if m.lower() not in _MODIFIERS:
+            return f"unknown modifier {m!r} in {spec!r} (use Control, Shift, Alt, Meta)"
+        modifiers.append(_MODIFIERS[m.lower()])
+    key = _KEY_ALIASES.get(key.lower(), key)
+    if key in _NAMED_KEYS:
+        code, vk = _NAMED_KEYS[key]
+        text = "\r" if key == "Enter" else (" " if code == "Space" else "")
+        return modifiers, (" " if code == "Space" else key), code, vk, text
+    if len(key) == 1:
+        shifted = any(m[0] == 8 for m in modifiers)
+        if key.isalpha():
+            code, vk = f"Key{key.upper()}", ord(key.upper())
+            key = key.upper() if shifted else key.lower()
+        elif key.isdigit():
+            code, vk = f"Digit{key}", ord(key)
+        else:
+            code, vk = "", 0
+        return modifiers, key, code, vk, key
+    return (f"unknown key {key!r} — use a single character or one of: "
+            + ", ".join(k for k in _NAMED_KEYS if k != " "))
+
+
+def press_key(key: str) -> dict:
+    """Press a key or a shortcut: "Enter", "Tab", "Control+a", "Control+Shift+End".
+
+    Modifiers are sent as real modifier state. Before, "Control+a" went out as
+    a single key literally named "Control+a" with no modifiers, which pages
+    ignore — while the tool still reported "Pressed Control+a", so an agent
+    believed it had selected everything and typed a second copy after the first.
+    """
+    parsed = _parse_key(key)
+    if isinstance(parsed, str):
+        return {"error": parsed}
+    modifiers, name, code, vk, text = parsed
+    bits = 0
+    # A shortcut (any modifier but Shift) must not also type its character.
+    typing = bool(text) and not any(m[0] in (1, 2, 4) for m in modifiers)
+    with _lock:
+        for bit, mkey, mcode, mvk in modifiers:
+            bits |= bit
+            _send_cdp("Input.dispatchKeyEvent", {
+                "type": "rawKeyDown", "key": mkey, "code": mcode,
+                "windowsVirtualKeyCode": mvk, "modifiers": bits,
+            })
+        down = {"type": "keyDown" if typing else "rawKeyDown", "key": name, "code": code,
+                "windowsVirtualKeyCode": vk, "modifiers": bits}
+        if typing:
+            down["text"] = text
+        _send_cdp("Input.dispatchKeyEvent", down)
         _send_cdp("Input.dispatchKeyEvent", {
-            "type": "keyUp", "key": key, "code": key,
-            "windowsVirtualKeyCode": kc, "text": "",
+            "type": "keyUp", "key": name, "code": code,
+            "windowsVirtualKeyCode": vk, "modifiers": bits,
         })
+        for bit, mkey, mcode, mvk in reversed(modifiers):
+            bits &= ~bit
+            _send_cdp("Input.dispatchKeyEvent", {
+                "type": "keyUp", "key": mkey, "code": mcode,
+                "windowsVirtualKeyCode": mvk, "modifiers": bits,
+            })
     return {"status": f"Pressed {key}"}
 
 
