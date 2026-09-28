@@ -37,6 +37,11 @@ class SandboxConfig:
     max_concurrent: int = 5
     max_rounds: int = 10
     timeout: int = 1800
+    # Enforce each exec's ``timeout`` inside the container with coreutils
+    # ``timeout`` (TERM to the command's process group, KILL 5 s later). Off,
+    # ``docker exec`` has no deadline at all and a runaway command runs until
+    # it exits on its own. Off by default to preserve prior behaviour.
+    enforce_exec_timeout: bool = False
 
     # --- Container layout (consumed by the control daemon in the carve phase) ---
     source_mount: str = "/source"         # full-repo rw mount for self-improvement

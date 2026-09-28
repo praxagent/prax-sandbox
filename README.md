@@ -33,6 +33,9 @@ small Python client that has **no dependency on any harness**.
 # 1. Build + run the sandbox
 make build
 docker compose up -d     # publishes, on 127.0.0.1 only: CDP :9223, noVNC desktop :6080, clipboard bridge :6090
+# Recommended: add the resource-limits overlay (memory, pids, a 1 GB tmpfs /tmp,
+# dropped capabilities) — opt-in so the default stays what it was:
+#   docker compose -f docker-compose.yml -f docker-compose.limits.yml up -d
 
 # 2. Drive it from your harness (no prax required)
 pip install -e .
@@ -106,7 +109,7 @@ bearer token — see **[docs/remote.md](docs/remote.md)**.
 ### Known gaps (2026-09)
 
 - **Residue of the removed subsystem on the client dataclass.** `SandboxConfig` keeps `host`, `default_model`, `anthropic_key` / `openai_key` / `opencode_password` and the session-policy fields, none of which the control plane reads (kept for source-compatibility with harnesses that still pass them); `transport._iter_sse` has no callers. The daemon side was stripped on 2026-09-07: `daemon/config.py` no longer reads `PRAX_SANDBOX_OPENCODE_*`, `ANTHROPIC_API_KEY`, `OPENAI_API_KEY` or `SANDBOX_DEFAULT_MODEL` from the daemon's env, `daemon/app.py` no longer probes `:4096`, and `docker-compose.remote.yml` no longer demands `OPENCODE_SERVER_PASSWORD` (its healthcheck is `pgrep -x supervisord`).
-- **Container hardening.** The container runs as root (no `USER` in the Dockerfile; `supervisord.conf` `user=root`), Chromium launches with `--no-sandbox`, and neither compose file sets memory/pids limits, `cap_drop`, `security_opt`, or a bounded `/tmp`. The docker socket is not mounted into the sandbox container.
+- **Container hardening.** The container runs as root (no `USER` in the Dockerfile; `supervisord.conf` `user=root`) and Chromium launches with `--no-sandbox`. Memory/pids limits, a sized tmpfs `/tmp`, a small `cap_drop` and `no-new-privileges` exist since 2026-09-23 but only in the **opt-in** `docker-compose.limits.yml`; writes to `/workspace` and the rest of the root filesystem stay unbounded either way (Docker cannot size those without filesystem quotas). Exec deadlines are enforced only with `SandboxConfig.enforce_exec_timeout` / `PRAX_SANDBOX_ENFORCE_EXEC_TIMEOUT`. The docker socket is not mounted into the sandbox container.
 - **code-server** is installed and `8443` is `EXPOSE`d, but no supervisord program starts it and neither compose file publishes `8443`.
 
 ### Planned
@@ -115,7 +118,8 @@ bearer token — see **[docs/remote.md](docs/remote.md)**.
 - [ ] Drop the unread `SandboxConfig` fields (`host`, `default_model`, `anthropic_key` / `openai_key` / `opencode_password`, session policy) once consuming harnesses stop passing them, and remove `transport._iter_sse`
 - [ ] Live end-to-end integration test against a running sandbox container (a real `docker exec` round trip) — tests currently mock docker/HTTP
 - [x] Hosted CI for this repo — `.github/workflows/ci.yml` runs `make ci` on pull requests into `main` and pushes to `main` (2026-09-08). Not yet a merge gate: `test` must be added as a required status check on `main` once the first run has reported (branch protection currently requires none).
-- [ ] Container hardening: non-root user, drop `--no-sandbox`, pids/memory limits, bounded `/tmp`
+- [x] Opt-in resource limits (`docker-compose.limits.yml`: memory, pids, sized tmpfs `/tmp`, `cap_drop`, `no-new-privileges`) and opt-in exec deadlines — 2026-09-23, verified against the live image (a replay of the 2026-07-08 unbounded ffmpeg stops at the tmpfs size)
+- [ ] Container hardening: non-root user, drop `--no-sandbox`; make the limits the default once harnesses have run with them
 - [ ] First-class GPU support in this repo's own compose (works today via the harness's `docker-compose.gpu.yml` + `make sandbox-gpu`)
 - [ ] Kubernetes / Helm deployment path for the daemon + sandbox
 - [ ] Multi-tenant isolation (per-user containers/namespaces — one persistent container is shared today)
