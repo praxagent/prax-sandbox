@@ -72,3 +72,33 @@ def test_health_false_when_exec_fails(cp, monkeypatch):
         raise RuntimeError("down")
     monkeypatch.setattr(cp, "exec_in_sandbox", boom)
     assert cp.health() is False
+
+
+class _Container:
+    def __init__(self):
+        self.calls = []
+
+    def exec_run(self, cmd, **kw):
+        self.calls.append(cmd)
+        return 0, b""
+
+
+def test_pip_and_npm_installs_are_recorded_on_the_workspace_mount(cp, monkeypatch):
+    """The record must outlive the container (it used to sit in /root, which
+    isn't mounted, so it vanished with the packages it described)."""
+    box = _Container()
+    monkeypatch.setattr(cp, "find_sandbox_container", lambda cfg: box)
+    cp._track_installed_packages("pip install requests rich", 0)
+    cp._track_installed_packages("npm install -g typescript", 0)
+    recorded = [(c[-3], c[-2], c[-1]) for c in box.calls]
+    assert recorded == [("/workspace/.sandbox", "requests", "installed-pip.txt"),
+                        ("/workspace/.sandbox", "rich", "installed-pip.txt"),
+                        ("/workspace/.sandbox", "typescript", "installed-npm.txt")]
+    assert not any("/root" in " ".join(c) for c in box.calls)
+
+
+def test_apt_is_left_to_the_images_dpkg_hook(cp, monkeypatch):
+    box = _Container()
+    monkeypatch.setattr(cp, "find_sandbox_container", lambda cfg: box)
+    cp._track_installed_packages("apt-get install -y htop && echo done", 0)
+    assert box.calls == []
