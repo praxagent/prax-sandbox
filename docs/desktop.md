@@ -57,7 +57,7 @@ The sandbox desktop comes with:
 | **xdotool, scrot, xsel** | Input synthesis, screenshots, clipboard — what the desktop tools and the clipboard bridge use |
 | **git, curl, wget, jq** | Standard dev tools |
 
-Prax can install additional packages at runtime with `sandbox_install("package-name")`. Installed packages are tracked in `/root/.installed_packages` (apt), `/root/.installed_pip_packages` and `/root/.installed_npm_packages`; they are **not** auto-reinstalled on rebuild — the entrypoint prints the manifests at boot so proven packages can be promoted into `sandbox/Dockerfile` (see [Sandbox Code Execution](sandbox.md#package-manifests)).
+Prax can install additional packages at runtime with `sandbox_install("package-name")`. Runtime installs are recorded on the workspace mount, so the record survives the container: `/workspace/.sandbox/installed-apt.txt` (a dpkg hook, whoever ran apt), `installed-pip.txt` and `installed-npm.txt` (installs Prax ran). They are **not** auto-reinstalled; to keep a package for good, list it in `sandbox/local-packages.txt`, which is built into the image (README, "Your own packages"; see [Sandbox Code Execution](sandbox.md#package-manifests)).
 
 ### Prax's Desktop Tools
 
@@ -136,8 +136,7 @@ What persists depends on which compose file runs the container:
 Under `/root` you will find:
 
 - **Browser profile** (`/root/.browser_profiles/default`) — cookies, localStorage, login sessions (the entrypoint clears only Chromium's singleton locks and the extension's cached service worker on boot)
-- **Desktop customizations** — XFCE config under `/root/.config/xfce4/` (seeded by the entrypoint on first run only), `.Xresources`
-- **Package manifests** (`/root/.installed_packages`, `.installed_pip_packages`, `.installed_npm_packages`) — recorded, **not** auto-reinstalled
+- **Desktop customizations** — XFCE config under `/root/.config/xfce4/` (seeded by the entrypoint on first run only), and your own `~/.Xdefaults` (xterm's defaults are in the image's app-defaults, `sandbox/xterm.Xresources`)
 - **Shell history** — bash history
 - **Downloads** — anything saved to `/root/`
 

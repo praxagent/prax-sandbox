@@ -134,6 +134,18 @@ COPY clipboard-bridge.py /usr/local/bin/clipboard-bridge.py
 COPY supervisord.conf /etc/supervisor/supervisord.conf
 COPY cast-ext/ /opt/prax-cast-ext/
 RUN chmod +x /usr/local/bin/entrypoint.sh /usr/local/bin/bash-respawn.sh /usr/local/bin/chromium-launch.sh
+
+# ── xterm settings + clipboard keys (see xterm.Xresources) ──
+COPY xterm.Xresources /tmp/xterm.Xresources
+RUN cat /tmp/xterm.Xresources >> /etc/X11/app-defaults/XTerm && rm /tmp/xterm.Xresources
+
+# ── Record apt packages installed at runtime (see record-apt-packages.sh) ──
+# Whoever installs them (Prax, the TeamWork terminal, the desktop), the list
+# lands in /workspace/.sandbox/installed-apt.txt and survives the container.
+COPY record-apt-packages.sh /usr/local/bin/record-apt-packages
+RUN chmod +x /usr/local/bin/record-apt-packages \
+    && echo 'DPkg::Post-Invoke { "/usr/local/bin/record-apt-packages || true"; };' \
+       > /etc/apt/apt.conf.d/99prax-record
 # tmux is still apt-installed above for opt-in user use (`tmux` from a
 # bash prompt just works).  We just don't auto-wrap the shell in it
 # anymore — that broke native xterm.js scrolling, resize behavior, and
@@ -156,5 +168,24 @@ EXPOSE 6080 6090 8443
 # The old check curled OpenCode's :4096, which no longer exists.
 HEALTHCHECK --interval=3s --timeout=2s --start-period=15s --retries=5 \
     CMD pgrep -x supervisord > /dev/null || exit 1
+
+# ── Your own packages: sandbox/local-packages.txt (not in git) ──
+# Last, so editing the list rebuilds only this layer. A name that doesn't
+# exist or won't install is skipped and reported, never fatal, unless
+# LOCAL_PACKAGES_STRICT=1 (README, "Your own packages"). The glob also matches
+# the committed example, so the COPY never fails when there is no list.
+# The baseline written afterwards is what record-apt-packages compares to.
+ARG LOCAL_PACKAGES_STRICT=0
+COPY install-local-packages.sh /usr/local/bin/install-local-packages
+COPY local-packages*.txt /tmp/local-packages/
+RUN chmod +x /usr/local/bin/install-local-packages \
+    && LOCAL_PACKAGES_STRICT="$LOCAL_PACKAGES_STRICT" \
+       install-local-packages /tmp/local-packages/local-packages.txt \
+    && rm -rf /tmp/local-packages \
+    && apt-mark showmanual | LC_ALL=C sort -u > /etc/prax-sandbox/baseline-packages.txt
+
+# Which list this image was built from (scripts/ensure-image.sh compares it).
+ARG LOCAL_PACKAGES_SHA=""
+LABEL prax.local-packages="${LOCAL_PACKAGES_SHA}"
 
 CMD ["/usr/local/bin/entrypoint.sh"]

@@ -35,7 +35,7 @@ through `prax_sandbox.control_plane`:
 |---|---|
 | `run_shell(command, timeout=60)` | `sh -c <command>` in the container; returns `{"stdout", "stderr", "exit_code"}` (stdout capped at 10 000 chars, stderr at 5 000). |
 | `run_command(cmd, cwd=None, env=None, timeout=300)` | argv exec (paths already translated by the harness); returns a `subprocess.CompletedProcess`. |
-| `install_package(name)` | `apt-get install -y --no-install-recommends <name>` in the container (name regex-validated) and appends it to `/root/.installed_packages`. |
+| `install_package(name)` | `apt-get install -y --no-install-recommends <name>` in the container (name regex-validated). The image's dpkg hook records it in `/workspace/.sandbox/installed-apt.txt`. |
 | `rebuild_sandbox(dockerfile_content=None)` | optionally overwrites `sandbox/Dockerfile`, runs `docker build -t prax-sandbox:latest sandbox/`, restarts the container (`container.restart`), and waits up to 60 s for `docker exec true` to succeed. |
 | `health()` | `True` once `docker exec … true` succeeds (there is no HTTP health endpoint in the container any more). |
 
@@ -88,9 +88,10 @@ There is no `[program:opencode]` and no `[program:code-server]`.
 ### Entrypoint (`sandbox/entrypoint.sh`)
 
 One-shot, in order: create the browser profile dir and clear its Chromium
-singleton locks; remove stale `:99` X locks; **print** any package manifests found
-under `/root` (see below); create `/opt/prax-venv` if missing and prepend it to
-`PATH`; seed XFCE config, `.Xresources` and default-application entries under
+singleton locks; remove stale `:99` X locks; **print** any entries of
+`sandbox/local-packages.txt` the build skipped, and move package records left in
+`/root` by older images to `/workspace/.sandbox/` (see below); create `/opt/prax-venv` if missing and prepend it to
+`PATH`; seed XFCE config and default-application entries under
 `/root` on first run only; rewrite the cast extension's signaling host
 (`PRAX_CAST_SIGNALING_HOST`, default `prax:8000`) and wipe its cached service
 worker; pin the extension in Chromium's `Preferences`; scan the `PATH` dirs for
@@ -149,17 +150,23 @@ no longer in the image. That same `sandbox` service also sets
 
 ### Package manifests
 
-`install_package` appends to `/root/.installed_packages`; `run_shell` additionally
-detects `apt(-get) install`, `pip(3) install` and `npm install -g` commands that
-exit 0 and appends their package names to `/root/.installed_packages`,
-`/root/.installed_pip_packages` and `/root/.installed_npm_packages` (best effort,
-`control_plane._track_installed_packages`).
+Runtime installs are recorded on the workspace mount, so the record outlives
+the container (it used to sit in `/root`, which the standalone compose does not
+mount, and vanished with the packages it described):
 
-These manifests are **not auto-reinstalled** on rebuild — deliberately (a bad
-package could break the desktop in a loop). On boot the entrypoint only prints
-them ("Package manifests found in /root/ — review and add to Dockerfile for
-persistence"). To make a package permanent, add it to `sandbox/Dockerfile`
-(`rebuild_sandbox(dockerfile_content=…)` does that from the harness side).
+- `/workspace/.sandbox/installed-apt.txt` — written by a dpkg hook
+  (`sandbox/record-apt-packages.sh`, `DPkg::Post-Invoke`) after every apt run,
+  whoever ran it: Prax, the TeamWork terminal, the desktop. It lists packages
+  installed since the image was built, only grows, and drops what the image now
+  carries.
+- `installed-pip.txt` / `installed-npm.txt` — `pip(3) install` and
+  `npm install -g` commands Prax ran through `run_shell` that exited 0 (best
+  effort, `control_plane._track_installed_packages`).
+
+These are **not auto-reinstalled** at start, deliberately (a bad package could
+break the desktop in a loop). To make a package permanent, add it to
+`sandbox/local-packages.txt`: `scripts/ensure-image.sh` builds it into the
+image, skipping and reporting bad entries (README, "Your own packages").
 
 ### Terminal sessions
 

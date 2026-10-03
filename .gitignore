@@ -8,3 +8,6 @@ uv.lock
 .ruff_cache/
 .coverage
 workspace/
+
+# Your own sandbox packages (sandbox/local-packages.example.txt)
+sandbox/local-packages.txt

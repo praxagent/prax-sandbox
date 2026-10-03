@@ -1,0 +1,27 @@
+
+! ── Prax sandbox: xterm settings ──
+! Appended to /etc/X11/app-defaults/XTerm at build time. xterm always reads
+! its app-defaults; a ~/.Xresources is only loaded by xrdb, which nothing in
+! this image runs, so settings put there never applied. Your own ~/.Xdefaults
+! still overrides anything here.
+xterm*faceName: DejaVu Sans Mono
+xterm*faceSize: 14
+xterm*background: #1e1e2e
+xterm*foreground: #cdd6f4
+xterm*cursorColor: #f5e0dc
+xterm*scrollBar: false
+xterm*saveLines: 10000
+
+! Clipboard keys. xterm normally copies and pastes only through the PRIMARY
+! selection (select, then middle-click), which TeamWork's clipboard bridge
+! does not sync, so text copied on your computer could not be pasted here.
+! These use CLIPBOARD, like the rest of the desktop:
+!   Ctrl+Shift+C            copy the selection
+!   Ctrl+V, Ctrl+Shift+V,   paste
+!   Shift+Insert
+! Ctrl+C still interrupts the running program.
+*VT100.translations: #override \n\
+    Ctrl Shift <Key>C: copy-selection(CLIPBOARD) \n\
+    Ctrl Shift <Key>V: insert-selection(CLIPBOARD) \n\
+    Ctrl ~Shift <Key>v: insert-selection(CLIPBOARD) \n\
+    Shift <Key>Insert: insert-selection(CLIPBOARD)

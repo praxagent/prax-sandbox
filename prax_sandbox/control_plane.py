@@ -112,44 +112,42 @@ def install_package(package_name: str) -> dict:
         stderr = (output[1] or b"").decode(errors="replace")
         if exit_code != 0:
             return {"error": f"apt-get failed (exit {exit_code}): {stderr[-500:]}"}
-        # Track installed package in a manifest for rebuild reproducibility.
-        try:
-            container.exec_run(
-                ["sh", "-c", f'echo "{package_name}" >> /root/.installed_packages'],
-            )
-        except Exception:
-            pass  # best-effort tracking
+        # Recorded for rebuilds by the image's dpkg hook
+        # (/workspace/.sandbox/installed-apt.txt), whoever ran apt.
         return {"installed": package_name, "output": stdout[-300:]}
     except Exception as e:
         return {"error": str(e)}
 
 
-def _track_installed_packages(command: str, exit_code: int) -> None:
-    """Best-effort: detect install commands and log packages to manifests.
+# Runtime install records live on the workspace mount, so they survive the
+# container being recreated, which is when the packages themselves are lost.
+# apt is recorded by the image's dpkg hook (sandbox/record-apt-packages.sh),
+# which sees every install, not just the ones that pass through here.
+MANIFEST_DIR = "/workspace/.sandbox"
 
-    Covers apt, pip, and npm global installs run via sandbox_shell / run_python.
-    Manifests live in /root/ (persisted) and the entrypoint restores them on rebuild.
-    """
+
+def _record(container, filename: str, packages: list[str]) -> None:
+    for pkg in packages:
+        container.exec_run([
+            "sh", "-c", 'mkdir -p "$1" && echo "$2" >> "$1/$3"',
+            "sh", MANIFEST_DIR, pkg, filename,
+        ])
+
+
+def _track_installed_packages(command: str, exit_code: int) -> None:
+    """Best-effort: record pip and npm global installs run via sandbox_shell /
+    run_python in ``/workspace/.sandbox/installed-{pip,npm}.txt``."""
     if exit_code != 0:
         return
     try:
         container = find_sandbox_container(_cfg())
-
-        # apt-get install / apt install
-        m = re.search(r"(?:apt-get|apt)\s+install\s+(?:-\S+\s+)*(.+)", command)
-        if m:
-            pkgs = re.findall(r"[a-zA-Z0-9][a-zA-Z0-9._+:-]+", m.group(1))
-            for pkg in pkgs:
-                container.exec_run(["sh", "-c", f'echo "{pkg}" >> /root/.installed_packages'])
-            return
 
         # pip install / pip3 install
         m = re.search(r"pip3?\s+install\s+(?:-\S+\s+)*(.+)", command)
         if m:
             pkgs = re.findall(r"[a-zA-Z0-9][a-zA-Z0-9._-]+", m.group(1))
             pkgs = [p for p in pkgs if not p.startswith("-") and "/" not in p]
-            for pkg in pkgs:
-                container.exec_run(["sh", "-c", f'echo "{pkg}" >> /root/.installed_pip_packages'])
+            _record(container, "installed-pip.txt", pkgs)
             return
 
         # npm install -g
@@ -159,8 +157,7 @@ def _track_installed_packages(command: str, exit_code: int) -> None:
         if m:
             pkgs = re.findall(r"[a-zA-Z0-9@][a-zA-Z0-9._/@-]+", m.group(1))
             pkgs = [p for p in pkgs if not p.startswith("-")]
-            for pkg in pkgs:
-                container.exec_run(["sh", "-c", f'echo "{pkg}" >> /root/.installed_npm_packages'])
+            _record(container, "installed-npm.txt", pkgs)
     except Exception:
         pass  # best-effort
 

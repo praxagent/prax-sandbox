@@ -121,6 +121,44 @@ Verified live against the real image (2026-09-24):
 - A fresh profile still asks about a few startup destinations (the start page,
   Chrome's account check).
 
+## Your own packages
+
+`apt-get install` inside the container lasts as long as the container. A
+restart or a reboot keeps it, but recreating the container (a new image, a
+compose change, `docker compose down`) loses it. To keep a package for good,
+build it into the image:
+
+1. Copy `sandbox/local-packages.example.txt` to `sandbox/local-packages.txt`
+   (not in git) and list Debian package names, one or more per line.
+2. Run `scripts/ensure-image.sh` (or `make image`). It rebuilds only when the
+   image is missing or the list changed, so harnesses can run it on every
+   start: Prax's `make restart-sandbox` and its deploy do. Then recreate the
+   container (`docker compose up -d` does it when the image changed).
+
+**A bad entry is skipped, not fatal, and you are told.** The list outlives the
+Debian release it was written for (packages get renamed), and one typo must
+not block every later rebuild, security updates included. Skipped entries,
+with the reason (`invalid-name`, `not-found`, `install-failed`,
+`apt-update-failed`), are printed by the build and by `ensure-image.sh`,
+repeated at every container start (`docker logs`), and kept in
+`/etc/prax-sandbox/local-packages.report` in the image. Set
+`LOCAL_PACKAGES_STRICT=1` to make them fail the build instead.
+
+**What you installed by hand is recorded** where it survives the container:
+`/workspace/.sandbox/installed-apt.txt` (a dpkg hook sees every install,
+from Prax, the terminal or the desktop), plus `installed-pip.txt` /
+`installed-npm.txt` for installs Prax ran. These are not reinstalled
+automatically (a bad package could break the desktop in a loop); copy the
+ones you want into `local-packages.txt`.
+
+## Desktop terminal: copy and paste
+
+The desktop's terminal is xterm, set up to use the clipboard that TeamWork
+syncs with your computer: **Ctrl+Shift+C** copies the selection,
+**Ctrl+V**, **Ctrl+Shift+V** or **Shift+Insert** pastes. **Ctrl+C** still
+interrupts the running program. Settings live in `sandbox/xterm.Xresources`
+(xterm's app-defaults); override them in `~/.Xdefaults`.
+
 ## Docs
 
 - [docs/](docs/README.md) — sandbox internals (code execution, desktop, browser)
@@ -137,7 +175,7 @@ Verified live against the real image (2026-09-24):
 
 **Control plane**
 - [x] `docker exec` primitives — `run_shell` / `run_command` (container discovery by compose-service label)
-- [x] `install_package` (apt) + best-effort install manifests under `/root/` for apt/pip/npm commands seen by `run_shell`; image rebuild from an edited Dockerfile (`rebuild_sandbox`)
+- [x] `install_package` (apt); runtime install records on the workspace mount (`/workspace/.sandbox/installed-{apt,pip,npm}.txt`, apt via a dpkg hook); your own packages baked in from `sandbox/local-packages.txt` (`scripts/ensure-image.sh`); image rebuild from an edited Dockerfile (`rebuild_sandbox`)
 - [x] Liveness = "can I `docker exec true`" (`health`)
 
 **Browser & desktop**
