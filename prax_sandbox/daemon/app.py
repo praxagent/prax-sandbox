@@ -131,6 +131,12 @@ def build_app(cfg) -> FastAPI:
             raise HTTPException(status_code=403, detail="image rebuild is disabled on this daemon")
         return await run_in_threadpool(control_plane.rebuild_sandbox, body.get("dockerfile_content"))
 
+    @app.post("/v1/restart", dependencies=auth)
+    async def restart():
+        # Restart, not rebuild: the container and everything installed in it
+        # are kept, so unlike /v1/rebuild this needs no extra switch.
+        return await run_in_threadpool(control_plane.restart_sandbox)
+
     # (OpenCode solutions-archive + stale-session cleanup routes removed.)
 
     # --- file API (confined per-user) ---

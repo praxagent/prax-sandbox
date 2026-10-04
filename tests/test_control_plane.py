@@ -102,3 +102,33 @@ def test_apt_is_left_to_the_images_dpkg_hook(cp, monkeypatch):
     monkeypatch.setattr(cp, "find_sandbox_container", lambda cfg: box)
     cp._track_installed_packages("apt-get install -y htop && echo done", 0)
     assert box.calls == []
+
+
+class _Restartable:
+    name = "prax-sandbox-sandbox-1"
+
+    def __init__(self, fail=False):
+        self.restarted, self.fail = [], fail
+
+    def restart(self, timeout=None):
+        if self.fail:
+            raise RuntimeError("daemon said no")
+        self.restarted.append(timeout)
+
+
+def test_restart_keeps_the_container_and_waits_until_ready(cp, monkeypatch):
+    box = _Restartable()
+    monkeypatch.setattr(cp, "find_sandbox_container", lambda cfg: box)
+    monkeypatch.setattr(cp, "_container_ready", lambda timeout=0: True)
+    assert cp.restart_sandbox() == {"restarted": "prax-sandbox-sandbox-1", "ready": True}
+    assert box.restarted == [10]                      # restart, not recreate
+
+
+def test_restart_failures_are_reported(cp, monkeypatch):
+    monkeypatch.setattr(cp, "find_sandbox_container", lambda cfg: _Restartable(fail=True))
+    assert "daemon said no" in cp.restart_sandbox()["error"]
+
+    def missing(cfg):
+        raise LookupError("no container with that label")
+    monkeypatch.setattr(cp, "find_sandbox_container", missing)
+    assert "No sandbox container" in cp.restart_sandbox()["error"]

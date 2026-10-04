@@ -50,6 +50,10 @@ class SandboxClient:
     def rebuild_sandbox(self, dockerfile_content=None):
         return self._t.rebuild_sandbox(dockerfile_content)
 
+    def restart_sandbox(self):
+        """Restart the container (files and installed packages stay)."""
+        return self._t.restart_sandbox()
+
     # --- Introspection ---
     def get_runtime_mode(self):
         return self._t.get_runtime_mode()
