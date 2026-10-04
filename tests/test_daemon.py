@@ -121,6 +121,17 @@ class TestRebuildGate:
             assert c.get("/v1/capabilities", headers=AUTH).json()["rebuild"] is True
 
 
+class TestRestart:
+    def test_restart_needs_no_extra_switch(self, tmp_path, monkeypatch):
+        cfg = DaemonConfig(bearer_token=TOKEN, workspace_dir=str(tmp_path))
+        monkeypatch.setattr(control_plane, "configure", lambda c: None)
+        monkeypatch.setattr(control_plane, "restart_sandbox", lambda: {"restarted": "box", "ready": True})
+        with TestClient(build_app(cfg)) as c:
+            assert c.post("/v1/restart", json={}).status_code == 401      # still behind the bearer
+            r = c.post("/v1/restart", headers=AUTH, json={})
+            assert r.status_code == 200 and r.json() == {"restarted": "box", "ready": True}
+
+
 class TestSerializationParity:
     """The daemon must serialize control-plane returns identically to in-process."""
 

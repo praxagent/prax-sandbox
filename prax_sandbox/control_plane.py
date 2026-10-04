@@ -232,6 +232,26 @@ def health() -> bool:
     return _container_ready(timeout=3)
 
 
+def restart_sandbox(ready_timeout: float = 60.0) -> dict:
+    """Restart the sandbox container — for when the desktop, a terminal or the
+    browser is stuck.
+
+    ``docker restart`` keeps the container: files, installed packages and the
+    browser profile survive; running programs stop. Waits until the container
+    can run a command again (``ready``).
+    """
+    try:
+        container = find_sandbox_container(_cfg())
+    except Exception as e:
+        return {"error": f"No sandbox container to restart: {e}"}
+    try:
+        container.restart(timeout=10)
+    except Exception as e:
+        return {"error": f"Restart failed: {e}"}
+    return {"restarted": getattr(container, "name", "sandbox"),
+            "ready": _container_ready(timeout=ready_timeout)}
+
+
 def rebuild_sandbox(dockerfile_content: str | None = None) -> dict:
     """Rebuild the sandbox Docker image and restart the container.
 
