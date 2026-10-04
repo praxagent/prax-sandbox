@@ -1,0 +1,19 @@
+# Your own apt packages for the sandbox image.
+#
+# Copy this file to local-packages.txt (same folder; it is not in git) and
+# list one or more Debian package names per line. They are installed when the
+# image is built, so they survive restarts and container recreation.
+# scripts/ensure-image.sh (run by Prax's `make restart-sandbox` and its deploy)
+# rebuilds the image when this list changes.
+#
+# A name that doesn't exist or won't install is skipped and reported, not
+# fatal: see the build output, `docker logs` of the container, or
+# /etc/prax-sandbox/local-packages.report inside it.
+# LOCAL_PACKAGES_STRICT=1 makes skipped entries fail the build instead.
+#
+# Packages you've installed by hand since the last build are recorded in the
+# workspace at .sandbox/installed-apt.txt: copy the ones you want to keep.
+#
+# Examples:
+# htop
+# ripgrep fd-find

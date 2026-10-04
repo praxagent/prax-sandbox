@@ -22,17 +22,31 @@ rm -f /tmp/.X11-unix/X99 2>/dev/null
 #  coding-agent CLIs are no longer installed in the image. A user who installs
 #  one themselves manages its own config.)
 
-# ── Package install manifests ──
-# Packages installed via Prax (sandbox_install, sandbox_shell, run_python)
-# are tracked in /root/.installed_packages, .installed_pip_packages,
-# and .installed_npm_packages.  These are NOT auto-reinstalled on rebuild
-# (a bad package could break the desktop in a loop).  Instead, review the
-# manifests and add proven packages to the Dockerfile manually.
-if [ -f /root/.installed_packages ] || [ -f /root/.installed_pip_packages ] || [ -f /root/.installed_npm_packages ]; then
-  echo "Package manifests found in /root/ — review and add to Dockerfile for persistence:"
-  [ -f /root/.installed_packages ] && echo "  apt: $(sort -u /root/.installed_packages | tr '\n' ' ')"
-  [ -f /root/.installed_pip_packages ] && echo "  pip: $(sort -u /root/.installed_pip_packages | tr '\n' ' ')"
-  [ -f /root/.installed_npm_packages ] && echo "  npm: $(sort -u /root/.installed_npm_packages | tr '\n' ' ')"
+# ── Packages: what the image installed, what you installed since ──
+# Your own list (sandbox/local-packages.txt) is installed at image build;
+# anything it skipped is repeated here so it shows up in `docker logs`.
+REPORT=/etc/prax-sandbox/local-packages.report
+if [ -f "$REPORT" ] && grep -q '^skipped ' "$REPORT"; then
+  echo "[sandbox] WARNING: entries in sandbox/local-packages.txt were skipped at build:" >&2
+  grep '^skipped ' "$REPORT" | sed 's/^skipped /[sandbox]   /' >&2
+fi
+# Packages installed at runtime are recorded under /workspace/.sandbox/
+# (installed-apt.txt by the dpkg hook; installed-pip.txt / installed-npm.txt
+# by Prax's control plane), which survives this container. They are NOT
+# reinstalled automatically (a bad package could break the desktop in a
+# loop): copy the ones you want into sandbox/local-packages.txt.
+# Older images kept these lists in /root, which is not mounted; carry them over.
+if [ -d /workspace ]; then
+  mkdir -p /workspace/.sandbox 2>/dev/null || true
+  for pair in .installed_packages:installed-apt.txt \
+              .installed_pip_packages:installed-pip.txt \
+              .installed_npm_packages:installed-npm.txt; do
+    old="/root/${pair%%:*}"; new="/workspace/.sandbox/${pair#*:}"
+    if [ -f "$old" ]; then
+      { [ -f "$new" ] && cat "$new"; cat "$old"; } | sort -u > "$new.tmp" 2>/dev/null \
+        && mv "$new.tmp" "$new" && rm -f "$old"
+    fi
+  done
 fi
 
 # Terminal state persistence is owned by TeamWork's terminal router
@@ -58,15 +72,9 @@ x-scheme-handler/https=chromium-browser.desktop
 text/html=chromium-browser.desktop
 DEFAULTS
 
-[ ! -f /root/.Xresources ] && cat > /root/.Xresources <<'XRES'
-xterm*faceName: DejaVu Sans Mono
-xterm*faceSize: 14
-xterm*background: #1e1e2e
-xterm*foreground: #cdd6f4
-xterm*cursorColor: #f5e0dc
-xterm*scrollBar: false
-xterm*saveLines: 10000
-XRES
+# xterm settings and clipboard keys live in the image's app-defaults
+# (sandbox/xterm.Xresources). A ~/.Xresources was seeded here before, but
+# only xrdb loads that file and nothing runs xrdb, so it never applied.
 
 [ ! -f /root/.config/xfce4/helpers.rc ] && echo "TerminalEmulator=xterm" > /root/.config/xfce4/helpers.rc
 

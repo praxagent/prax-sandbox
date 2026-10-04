@@ -71,6 +71,10 @@ async def handler(ws):
                     last_clipboard = text
                     await asyncio.to_thread(xsel_set, text)
                     log.info("Clipboard set from browser (%d chars)", len(text))
+                    # Tell the sender the desktop has it: TeamWork holds a
+                    # paste key until then, so Ctrl+V pastes the new text and
+                    # not the old. Clients that don't know "set-ok" ignore it.
+                    await ws.send(json.dumps({"type": "set-ok"}))
                 elif msg.get("type") == "get":
                     current = await asyncio.to_thread(xsel_get)
                     await ws.send(json.dumps({"type": "clipboard", "text": current}))
